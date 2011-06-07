@@ -13,18 +13,18 @@ use IO::Socket::UNIX;
 use Math::BigInt;
 use Getopt::Tree;
 use Getopt::Long;
-use zpd_lib;
+use zpdapp;
 $Getopt::Tree::SWITCH_PREFIX_STR = '';
-$Data::Dumper::Useqq = 1;
+$Data::Dumper::Useqq             = 1;
 
 my %pending_power_events;
 
 my $ui_options = [
-    {   name => 'help', abbr => '?', descr => 'This message.', exists => 1 },
+    { name => 'help', abbr => '?', descr => 'This message.', exists => 1 },
     #{   name => 'exit', descr => 'Exit.', exists => 1 },
     {
-        name => 'ping',
-        descr => 'Ping a node.', 
+        name  => 'ping',
+        descr => 'Ping a node.',
     },
     {
         name   => 'show',
@@ -37,21 +37,21 @@ my $ui_options = [
                 exists => 1,
                 params => [
                     {
-                        name => 'discover',
-                        descr => 'Initiate active network discovery.',
-                        exists => 1,
+                        name     => 'discover',
+                        descr    => 'Initiate active network discovery.',
+                        exists   => 1,
                         optional => 1,
                     },
                 ],
             },
             {
-                name => 'clients',
-                descr => 'Shows other connected clients.',
+                name   => 'clients',
+                descr  => 'Shows other connected clients.',
                 exists => 1,
             },
             {
-                name => 'aliases',
-                descr => 'Shows configured node aliases.',
+                name   => 'aliases',
+                descr  => 'Shows configured node aliases.',
                 exists => 1,
             },
         ],
@@ -65,8 +65,8 @@ my $ui_options = [
                 descr  => 'Switch id.',
                 params => [
                     {
-                        name => 'value',
-                        descr => 'Set switch to specified value.',
+                        name     => 'value',
+                        descr    => 'Set switch to specified value.',
                         optional => 1,
                     }
                 ],
@@ -74,12 +74,12 @@ my $ui_options = [
         ],
     },
     {
-        name => 'set',
-        descr => 'Set various settings.',
+        name   => 'set',
+        descr  => 'Set various settings.',
         exists => 1,
         params => [
             {
-                name => 'unsolicited',
+                name  => 'unsolicited',
                 descr => 'Enable or disable receiving unsolicited events.',
             },
         ]
@@ -103,15 +103,15 @@ my $node_aliases;
     if ( $node_alias_file ) {
         $node_aliases = YAML::LoadFile( $node_alias_file ) || die "Failed to read node alias file: $!";
         if ( ref $node_aliases ne 'HASH' ) { die "Node alias file appears invalid."; }
-        foreach my $n ( keys( %{ $node_aliases } ) ) {
+        foreach my $n ( keys( %{$node_aliases} ) ) {
             if ( $n =~ /^\d+_\d+$/ ) {
                 warn "Node alias $n looks like an address, this is probably a bad idea.";
-                if ( ( $node_aliases->{$n} ne 'HASH' )
-                     || ( !defined $node_aliases->{$n}->{addr_h} )
-                     || ( $node_aliases->{$n}->{addr_h} !~ /^\d+$/ ) 
-                     || ( !defined $node_aliases->{$n}->{addr_l} )
-                     || ( $node_aliases->{$n}->{addr_l} !~ /^\d+$/ ) 
-                ) {
+                if (   ( $node_aliases->{$n} ne 'HASH' )
+                    || ( !defined $node_aliases->{$n}->{addr_h} )
+                    || ( $node_aliases->{$n}->{addr_h} !~ /^\d+$/ )
+                    || ( !defined $node_aliases->{$n}->{addr_l} )
+                    || ( $node_aliases->{$n}->{addr_l} !~ /^\d+$/ ) )
+                {
                     die "Node alias for $n appears to have missing or invalid address data";
                 }
             }
@@ -119,11 +119,11 @@ my $node_aliases;
     }
 }
 
-if ( -e zpd_lib::COM_SOCKET_PATH ) {
-    if ( IO::Socket::UNIX->new( Type => SOCK_STREAM, Peer => zpd_lib::COM_SOCKET_PATH ) ) {
+if ( -e zpdapp::COM_SOCKET_PATH ) {
+    if ( IO::Socket::UNIX->new( Type => SOCK_STREAM, Peer => zpdapp::COM_SOCKET_PATH ) ) {
         die "Process already running!";
     }
-    unlink zpd_lib::COM_SOCKET_PATH;
+    unlink zpdapp::COM_SOCKET_PATH;
 }
 
 my $serial_port_device_path = '/dev/ttyU0';
@@ -143,7 +143,7 @@ sub init_serial {
 my $serial_port_device = init_serial( $serial_port_device_path );
 
 my $api = Device::XBee::API::Power->new( { fh => $serial_port_device, async => 1, packet_timeout => 10 } ) || die $!;
-my $sock = IO::Socket::UNIX->new( Type => SOCK_STREAM, Local => zpd_lib::COM_SOCKET_PATH, Listen => 10 ) || die $!;
+my $sock = IO::Socket::UNIX->new( Type => SOCK_STREAM, Local => zpdapp::COM_SOCKET_PATH, Listen => 10 ) || die $!;
 my $sel = IO::Select->new( $sock, $serial_port_device->{FD} ) || die $!;
 my %clients;
 
@@ -153,7 +153,7 @@ while ( my @ready = $sel->can_read() ) {
         if ( $r == $sock ) {
             my $s = $sock->accept() || next;
             $sel->add( $s );
-            $s->autoflush(1);
+            $s->autoflush( 1 );
             $clients{$s} = { unsolicited => 0, sock => $s };
 
         } elsif ( $r == $serial_port_device->{FD} ) {
@@ -168,13 +168,13 @@ while ( my @ready = $sel->can_read() ) {
                 next;
             }
             if ( !defined eval { $read = parse_command( $read, $r ); return 42; } ) {
-                zpd_lib::syswrite_zpd_reply( $r, { exiting => $@ } );
+                zpdapp::syswrite_zpd_reply( $r, { exiting => $@ } );
                 delete $clients{$r};
                 $sel->remove( $r );
                 close( $r );
                 next;
             }
-            zpd_lib::syswrite_zpd_reply( $r, $read );
+            zpdapp::syswrite_zpd_reply( $r, $read );
         }
     }
 }
@@ -193,18 +193,18 @@ sub handle_xbee_event {
 
     return unless $packet->{power};
     my $sent_id = Device::XBee::API::Power::__make_unacked_id( $packet->{power}->{id} );
-    my $client = $pending_power_events{ $sent_id };
+    my $client  = $pending_power_events{$sent_id};
 
     if ( $client ) {
-        zpd_lib::syswrite_zpd_reply( $client, { request_id => $sent_id, power => $packet->{power} } );
-        delete $pending_power_events{ $sent_id };
+        zpdapp::syswrite_zpd_reply( $client, { request_id => $sent_id, power => $packet->{power} } );
+        delete $pending_power_events{$sent_id};
     } else {
         my @handles = $sel->handles();
         foreach my $c ( @handles ) {
             next if $c == $sock;
             next if $c == $serial_port_device->{FD};
             next unless $clients{$c}->{unsolicited};
-            zpd_lib::syswrite_zpd_reply( $client, { unsolicited => 1, power => $packet->{power} } );
+            zpdapp::syswrite_zpd_reply( $client, { unsolicited => 1, power => $packet->{power} } );
         }
     }
 }
@@ -244,18 +244,18 @@ sub parse_command {
                 if ( $config->{discover} ) {
                     $api->discover_network();
                 }
-                return [ $api->known_nodes() ];
+                return [$api->known_nodes()];
             } elsif ( $config->{clients} ) {
-                return [ keys %clients ];
+                return [keys %clients];
             } elsif ( $config->{aliases} ) {
                 return $node_aliases;
             }
 
         } elsif ( $op eq 'set' ) {
             if ( defined $config->{unsolicited} ) {
-                $clients{ $client }->{unsolicited} = $config->{unsolicited} ? 1 : 0;
+                $clients{$client}->{unsolicited} = $config->{unsolicited} ? 1 : 0;
             }
-            return { unsolicited => $clients{ $client }->{unsolicited} };
+            return { unsolicited => $clients{$client}->{unsolicited} };
 
         } elsif ( $op eq 'switch' ) {
             my ( $sh, $sl ) = sn_or_alis_to_addrs( $config->{switch} );
