@@ -2,9 +2,14 @@ package zpd_lib;
 
 use strict;
 use YAML;
+use IO::Socket::UNIX;
 
 use constant COM_SOCKET_PATH => '/tmp/xbee_power';
 use constant REPLY_SIZE_LENGTH => 8;
+
+sub connect_to_zpd {
+    return IO::Socket::UNIX->new( Type => SOCK_STREAM, Peer => zpd_lib::COM_SOCKET_PATH ) || die $!;
+}
 
 sub make_zpd_reply {
     my ( $msg ) = @_;
@@ -22,10 +27,11 @@ sub sysread_zpd_reply {
     my ( $fh ) = @_;
     my $read = sysread_zpd_reply_raw( $fh );
     return undef unless defined $read;
-    if ( eval {
+    if ( !defined eval {
         $read = YAML::Load( $read );
-        42;
-    } != 42 ) {
+        die unless ref $read eq 'HASH';
+        return 42;
+    } ) {
         return undef;
     }
     return $read;

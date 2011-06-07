@@ -21,7 +21,7 @@ my %pending_power_events;
 
 my $ui_options = [
     {   name => 'help', abbr => '?', descr => 'This message.', exists => 1 },
-    {   name => 'exit', descr => 'Exit.', exists => 1 },
+    #{   name => 'exit', descr => 'Exit.', exists => 1 },
     {
         name => 'ping',
         descr => 'Ping a node.', 
@@ -67,6 +67,7 @@ my $ui_options = [
                     {
                         name => 'value',
                         descr => 'Set switch to specified value.',
+                        optional => 1,
                     }
                 ],
             },
@@ -98,7 +99,7 @@ my $ui_options = [
 my $node_aliases;
 {
     my $node_alias_file;
-    GetOptions( 'node-alias-file=s' => \$node_alias_file );
+    die unless GetOptions( 'node-alias-file:s' => \$node_alias_file );
     if ( $node_alias_file ) {
         $node_aliases = YAML::LoadFile( $node_alias_file ) || die "Failed to read node alias file: $!";
         if ( ref $node_aliases ne 'HASH' ) { die "Node alias file appears invalid."; }
@@ -166,9 +167,8 @@ while ( my @ready = $sel->can_read() ) {
                 close( $r );
                 next;
             }
-            eval { $read = parse_command( $read, $r ); };
-            if ( $@ ) {
-                zpd_lib::syswrite_zpd_reply( $r, "Exiting: $@" );
+            if ( !defined eval { $read = parse_command( $read, $r ); return 42; } ) {
+                zpd_lib::syswrite_zpd_reply( $r, { exiting => $@ } );
                 delete $clients{$r};
                 $sel->remove( $r );
                 close( $r );
@@ -220,70 +220,88 @@ sub parse_command {
         ( $op, $config ) = parse_command_line( $ui_options, $cmd );
     };
     if ( $warnings ) {
-        return $warnings . "\nSee 'help' for usage.";
-
-    } elsif ( !$op || $op eq 'help' ) {
-        return print_usage( $ui_options, { return => 1, hide_top_line => 1 } );
-
-    } elsif ( $op eq 'exit' ) {
-        die 'exit';
-
-    } elsif ( $op eq 'show' ) {
-        if ( $config->{network} ) {
-            if ( $config->{discover} ) {
-                $api->discover_network();
-            }
-            return [ $api->known_nodes() ];
-        } elsif ( $config->{clients} ) {
-            return [ keys %clients ];
-        } elsif ( $config->{aliases} ) {
-            return $node_aliases;
-        }
-
-    } elsif ( $op eq 'set' ) {
-        if ( defined $config->{unsolicited} ) {
-            $clients{ $client }->{unsolicited} = $config->{unsolicited} ? 1 : 0;
-        }
-
-    } elsif ( $op eq 'switch' ) {
-        my ( $sh, $sl ) = sn_or_alis_to_addrs( $config->{switch} );
-        return "Invalid target" unless defined $sl;
-        my $t;
-        if ( defined $config->{value} ) {
-            $t = $api->switch_set( { sh => $sh, sl => $sl }, $config->{id}, $config->{value} );
-        } else {
-            $t = $api->switch_get( { sh => $sh, sl => $sl }, $config->{id} );
-        }
-        if ( !$t ) {
-            return "Operation failed";
-        } else {
-            $pending_power_events{$t} = $client;
-            return "Request id $t sent.";
-        }
-
-    } elsif ( $op eq 'sensor' ) {
-        my ( $sh, $sl ) = sn_or_alis_to_addrs( $config->{sensor} );
-        return "Invalid target" unless defined $sl;
-        my $t = $api->sensor_get( { sh => $sh, sl => $sl }, $config->{id} );
-        if ( !$t ) {
-            return "Operation failed";
-        } else {
-            $pending_power_events{$t} = $client;
-            return "Request id $t sent.";
-        }
-
-    } elsif ( $op eq 'ping' ) {
-        my ( $sh, $sl ) = sn_or_alis_to_addrs( $config->{ping} );
-        return "Invalid target" unless defined $sl;
-        my $t = $api->ping( { sh => $sh, sl => $sl } );
-        if ( !$t ) {
-            return "Operation failed";
-        } else {
-            $pending_power_events{$t} = $client;
-            return "Request id $t sent.";
-        }
+        return { error => "Syntax error:\n$warnings\nSee 'help' for usage." };
     }
 
-    return "I don't know how to '$cmd'. Try 'help' for usage.";
+    # Caller will disconnect client if we die in this function.
+    if ( $op eq 'exit' ) { die; }
+
+    my $success = eval {
+        # Remove the line number from the error message to be pretty.
+        local $SIG{__DIE__} = sub {
+            my ( $m ) = @_;
+            $m =~ s/ at .+ line \d+\.\z//;
+            die $m;
+        };
+        if ( !$op ) {
+            die print_usage( $ui_options, { return => 1, hide_top_line => 1 } );
+
+        } elsif ( $op eq 'help' ) {
+            return { usage => print_usage( $ui_options, { return => 1, hide_top_line => 1 } ) };
+
+        } elsif ( $op eq 'show' ) {
+            if ( $config->{network} ) {
+                if ( $config->{discover} ) {
+                    $api->discover_network();
+                }
+                return [ $api->known_nodes() ];
+            } elsif ( $config->{clients} ) {
+                return [ keys %clients ];
+            } elsif ( $config->{aliases} ) {
+                return $node_aliases;
+            }
+
+        } elsif ( $op eq 'set' ) {
+            if ( defined $config->{unsolicited} ) {
+                $clients{ $client }->{unsolicited} = $config->{unsolicited} ? 1 : 0;
+            }
+            return { unsolicited => $clients{ $client }->{unsolicited} };
+
+        } elsif ( $op eq 'switch' ) {
+            my ( $sh, $sl ) = sn_or_alis_to_addrs( $config->{switch} );
+            die "Invalid target" unless defined $sl;
+            my $t;
+            if ( defined $config->{value} ) {
+                $t = $api->switch_set( { sh => $sh, sl => $sl }, $config->{id}, $config->{value} );
+            } else {
+                $t = $api->switch_get( { sh => $sh, sl => $sl }, $config->{id} );
+            }
+            if ( !$t ) {
+                die "Operation failed";
+            } else {
+                $pending_power_events{$t} = $client;
+                return { id => $t };
+            }
+
+        } elsif ( $op eq 'sensor' ) {
+            my ( $sh, $sl ) = sn_or_alis_to_addrs( $config->{sensor} );
+            die "Invalid target" unless defined $sl;
+            my $t = $api->sensor_get( { sh => $sh, sl => $sl }, $config->{id} );
+            if ( !$t ) {
+                die "Operation failed";
+            } else {
+                $pending_power_events{$t} = $client;
+                return { id => $t };
+            }
+
+        } elsif ( $op eq 'ping' ) {
+            my ( $sh, $sl ) = sn_or_alis_to_addrs( $config->{ping} );
+            die "Invalid target" unless defined $sl;
+            my $t = $api->ping( { sh => $sh, sl => $sl } );
+            if ( !$t ) {
+                die "Operation failed";
+            } else {
+                $pending_power_events{$t} = $client;
+                return { id => $t };
+            }
+        }
+
+        die "I don't know how to '$cmd'. Try 'help' for usage.";
+    };
+    if ( !defined $success ) {
+        return { error => $@ };
+    }
+    if ( ref $success ne 'HASH' || exists $success->{error} ) { die "This doesn't seem right"; }
+    return $success;
 }
 
