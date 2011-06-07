@@ -13,11 +13,10 @@ use IO::Socket::UNIX;
 use Math::BigInt;
 use Getopt::Tree;
 use Getopt::Long;
+use zpd_lib;
 $Getopt::Tree::SWITCH_PREFIX_STR = '';
 $Data::Dumper::Useqq = 1;
 
-use constant USERLAND_COM_SOCKET => '/tmp/xbee_power';
-use constant REPLY_SIZE_LENGTH => 8;
 my %pending_power_events;
 
 my $ui_options = [
@@ -119,11 +118,11 @@ my $node_aliases;
     }
 }
 
-if ( -e USERLAND_COM_SOCKET ) {
-    if ( IO::Socket::UNIX->new( Type => SOCK_STREAM, Peer => USERLAND_COM_SOCKET ) ) {
+if ( -e zpd_lib::COM_SOCKET_PATH ) {
+    if ( IO::Socket::UNIX->new( Type => SOCK_STREAM, Peer => zpd_lib::COM_SOCKET_PATH ) ) {
         die "Process already running!";
     }
-    unlink USERLAND_COM_SOCKET;
+    unlink zpd_lib::COM_SOCKET_PATH;
 }
 
 my $serial_port_device_path = '/dev/ttyU0';
@@ -143,7 +142,7 @@ sub init_serial {
 my $serial_port_device = init_serial( $serial_port_device_path );
 
 my $api = Device::XBee::API::Power->new( { fh => $serial_port_device, async => 1, packet_timeout => 10 } ) || die $!;
-my $sock = IO::Socket::UNIX->new( Type => SOCK_STREAM, Local => USERLAND_COM_SOCKET, Listen => 10 ) || die $!;
+my $sock = IO::Socket::UNIX->new( Type => SOCK_STREAM, Local => zpd_lib::COM_SOCKET_PATH, Listen => 10 ) || die $!;
 my $sel = IO::Select->new( $sock, $serial_port_device->{FD} ) || die $!;
 my %clients;
 
@@ -169,23 +168,15 @@ while ( my @ready = $sel->can_read() ) {
             }
             eval { $read = parse_command( $read, $r ); };
             if ( $@ ) {
-                reply_to_client( $r, "Exiting: $@" );
+                zpd_lib::syswrite_zpd_reply( $r, "Exiting: $@" );
                 delete $clients{$r};
                 $sel->remove( $r );
                 close( $r );
                 next;
             }
-            reply_to_client( $r, $read );
+            zpd_lib::syswrite_zpd_reply( $r, $read );
         }
     }
-}
-
-sub reply_to_client {
-    my ( $c, $msg ) = @_;
-
-    $msg = YAML::Dump( $msg );
-    my $ml = length( $msg ) + 1;
-    return syswrite( $c, sprintf( '%0' . REPLY_SIZE_LENGTH . "x\n%s\n", $ml, $msg ) );
 }
 
 sub sn_or_alis_to_addrs {
@@ -205,7 +196,7 @@ sub handle_xbee_event {
     my $client = $pending_power_events{ $sent_id };
 
     if ( $client ) {
-        reply_to_client( $client, { request_id => $sent_id, power => $packet->{power} } );
+        zpd_lib::syswrite_zpd_reply( $client, { request_id => $sent_id, power => $packet->{power} } );
         delete $pending_power_events{ $sent_id };
     } else {
         my @handles = $sel->handles();
@@ -213,7 +204,7 @@ sub handle_xbee_event {
             next if $c == $sock;
             next if $c == $serial_port_device->{FD};
             next unless $clients{$c}->{unsolicited};
-            reply_to_client( $client, { unsolicited => 1, power => $packet->{power} } );
+            zpd_lib::syswrite_zpd_reply( $client, { unsolicited => 1, power => $packet->{power} } );
         }
     }
 }
