@@ -12,6 +12,7 @@ use IO::Select;
 use IO::Socket::UNIX;
 use Math::BigInt;
 use Getopt::Tree;
+use Getopt::Long;
 $Getopt::Tree::SWITCH_PREFIX_STR = '';
 $Data::Dumper::Useqq = 1;
 
@@ -47,6 +48,11 @@ my $ui_options = [
             {
                 name => 'clients',
                 descr => 'Shows other connected clients.',
+                exists => 1,
+            },
+            {
+                name => 'aliases',
+                descr => 'Shows configured node aliases.',
                 exists => 1,
             },
         ],
@@ -89,6 +95,29 @@ my $ui_options = [
         ],
     },
 ];
+
+my $node_aliases;
+{
+    my $node_alias_file;
+    GetOptions( 'node-alias-file=s' => \$node_alias_file );
+    if ( $node_alias_file ) {
+        $node_aliases = YAML::LoadFile( $node_alias_file ) || die "Failed to read node alias file: $!";
+        if ( ref $node_aliases ne 'HASH' ) { die "Node alias file appears invalid."; }
+        foreach my $n ( keys( %{ $node_aliases } ) ) {
+            if ( $n =~ /^\d+_\d+$/ ) {
+                warn "Node alias $n looks like an address, this is probably a bad idea.";
+                if ( ( $node_aliases->{$n} ne 'HASH' )
+                     || ( !defined $node_aliases->{$n}->{addr_h} )
+                     || ( $node_aliases->{$n}->{addr_h} !~ /^\d+$/ ) 
+                     || ( !defined $node_aliases->{$n}->{addr_l} )
+                     || ( $node_aliases->{$n}->{addr_l} !~ /^\d+$/ ) 
+                ) {
+                    die "Node alias for $n appears to have missing or invalid address data";
+                }
+            }
+        }
+    }
+}
 
 if ( -e USERLAND_COM_SOCKET ) {
     if ( IO::Socket::UNIX->new( Type => SOCK_STREAM, Peer => USERLAND_COM_SOCKET ) ) {
@@ -159,8 +188,12 @@ sub reply_to_client {
     return syswrite( $c, sprintf( '%0' . REPLY_SIZE_LENGTH . "x\n%s\n", $ml, $msg ) );
 }
 
-sub sn_to_parts {
+sub sn_or_alis_to_addrs {
     my ( $sn ) = @_;
+    if ( $node_aliases->{$sn} ) {
+        return $node_aliases->{$sn}->{addr_h}, $node_aliases->{$sn}->{addr_l};
+    }
+    if ( $sn !~ /^\d+_\d+$/ ) { return; }
     return split( /_/, $sn );
 }
 
@@ -212,6 +245,8 @@ sub parse_command {
             return [ $api->known_nodes() ];
         } elsif ( $config->{clients} ) {
             return [ keys %clients ];
+        } elsif ( $config->{aliases} ) {
+            return $node_aliases;
         }
 
     } elsif ( $op eq 'set' ) {
@@ -220,7 +255,8 @@ sub parse_command {
         }
 
     } elsif ( $op eq 'switch' ) {
-        my ( $sh, $sl ) = sn_to_parts( $config->{switch} );
+        my ( $sh, $sl ) = sn_or_alis_to_addrs( $config->{switch} );
+        return "Invalid target" unless defined $sl;
         my $t;
         if ( defined $config->{value} ) {
             $t = $api->switch_set( { sh => $sh, sl => $sl }, $config->{id}, $config->{value} );
@@ -235,7 +271,8 @@ sub parse_command {
         }
 
     } elsif ( $op eq 'sensor' ) {
-        my ( $sh, $sl ) = sn_to_parts( $config->{sensor} );
+        my ( $sh, $sl ) = sn_or_alis_to_addrs( $config->{sensor} );
+        return "Invalid target" unless defined $sl;
         my $t = $api->sensor_get( { sh => $sh, sl => $sl }, $config->{id} );
         if ( !$t ) {
             return "Operation failed";
@@ -245,7 +282,8 @@ sub parse_command {
         }
 
     } elsif ( $op eq 'ping' ) {
-        my ( $sh, $sl ) = sn_to_parts( $config->{ping} );
+        my ( $sh, $sl ) = sn_or_alis_to_addrs( $config->{ping} );
+        return "Invalid target" unless defined $sl;
         my $t = $api->ping( { sh => $sh, sl => $sl } );
         if ( !$t ) {
             return "Operation failed";
