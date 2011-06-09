@@ -298,15 +298,23 @@ sub free_frame_id {
     delete $self->{in_flight_uart_frames}->{$id};
 }
 
+# id 0 is special, don't allocate it. I don't know if we should die here or
+# return 0 on failure...
 sub alloc_frame_id {
     my ( $self ) = @_;
-    my $id;
-    do {
-        $id = int( rand( 255 ) ) + 1;
-    } while ( $self->{in_flight_uart_frames}->{$id} );
-    $self->{in_flight_uart_frames}->{$id} = 1;
-
-    return $id;
+    my $start_id = int( rand( 255 ) ) + 1;
+    my $id = $start_id;
+    while (1) {
+        if ( !exists $self->{in_flight_uart_frames}->{$id} ) {
+            $self->{in_flight_uart_frames}->{$id} = 1;
+            return $id;
+        }
+        $id++;
+        if ( $id > 255 ) { $id = 1; }
+        if ( $id == $start_id ) {
+            die "Unable to allocate frame id!";
+        }
+    }
 }
 
 sub parse_packet {
