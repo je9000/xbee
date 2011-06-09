@@ -18,6 +18,16 @@ $Getopt::Tree::SWITCH_PREFIX_STR = '';
 $Data::Dumper::Useqq             = 1;
 
 my %pending_power_events;
+my $sock;
+
+sub on_exit {
+    if ( $sock ) {
+        unlink zpdapp::COM_SOCKET_PATH;
+    }
+}
+
+$SIG{INT} = \&on_exit;
+$SIG{TERM} = \&on_exit;
 
 my $ui_options = [
     { name => 'help', abbr => '?', descr => 'This message.', exists => 1 },
@@ -143,7 +153,7 @@ sub init_serial {
 my $serial_port_device = init_serial( $serial_port_device_path );
 
 my $api = Device::XBee::API::Power->new( { fh => $serial_port_device, async => 1, packet_timeout => 10 } ) || die $!;
-my $sock = IO::Socket::UNIX->new( Type => SOCK_STREAM, Local => zpdapp::COM_SOCKET_PATH, Listen => 10 ) || die $!;
+$sock = IO::Socket::UNIX->new( Type => SOCK_STREAM, Local => zpdapp::COM_SOCKET_PATH, Listen => 10 ) || die $!;
 my $sel = IO::Select->new( $sock, $serial_port_device->{FD} ) || die $!;
 my %clients;
 
@@ -179,7 +189,7 @@ while ( my @ready = $sel->can_read() ) {
     }
 }
 
-sub sn_or_alis_to_addrs {
+sub sn_or_alias_to_addrs {
     my ( $sn ) = @_;
     if ( $node_aliases->{$sn} ) {
         return $node_aliases->{$sn}->{addr_h}, $node_aliases->{$sn}->{addr_l};
@@ -258,7 +268,7 @@ sub parse_command {
             return { unsolicited => $clients{$client}->{unsolicited} };
 
         } elsif ( $op eq 'switch' ) {
-            my ( $sh, $sl ) = sn_or_alis_to_addrs( $config->{switch} );
+            my ( $sh, $sl ) = sn_or_alias_to_addrs( $config->{switch} );
             die "Invalid target" unless defined $sl;
             my $t;
             if ( defined $config->{value} ) {
@@ -274,7 +284,7 @@ sub parse_command {
             }
 
         } elsif ( $op eq 'sensor' ) {
-            my ( $sh, $sl ) = sn_or_alis_to_addrs( $config->{sensor} );
+            my ( $sh, $sl ) = sn_or_alias_to_addrs( $config->{sensor} );
             die "Invalid target" unless defined $sl;
             my $t = $api->sensor_get( { sh => $sh, sl => $sl }, $config->{id} );
             if ( !$t ) {
@@ -285,7 +295,7 @@ sub parse_command {
             }
 
         } elsif ( $op eq 'ping' ) {
-            my ( $sh, $sl ) = sn_or_alis_to_addrs( $config->{ping} );
+            my ( $sh, $sl ) = sn_or_alias_to_addrs( $config->{ping} );
             die "Invalid target" unless defined $sl;
             my $t = $api->ping( { sh => $sh, sl => $sl } );
             if ( !$t ) {
