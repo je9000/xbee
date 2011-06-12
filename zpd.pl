@@ -24,6 +24,7 @@ sub on_exit {
     if ( $sock ) {
         unlink zpdapp::COM_SOCKET_PATH;
     }
+    exit 2;
 }
 
 $SIG{INT} = \&on_exit;
@@ -189,6 +190,8 @@ while ( my @ready = $sel->can_read() ) {
     }
 }
 
+die "Should not be here!";
+
 sub sn_or_alias_to_addrs {
     my ( $sn ) = @_;
     if ( $node_aliases->{$sn} ) {
@@ -234,7 +237,7 @@ sub parse_command {
     }
 
     # Caller will disconnect client if we die in this function.
-    if ( $op eq 'exit' ) { die; }
+    if ( defined $op && $op eq 'exit' ) { die; }
 
     my $success = eval {
         # Remove the line number from the error message to be pretty.
@@ -311,7 +314,25 @@ sub parse_command {
     if ( !defined $success ) {
         return { error => $@ };
     }
-    if ( ref $success ne 'HASH' || exists $success->{error} ) { die "This doesn't seem right"; }
+    if ( ref $success eq '' || ( ref $success eq 'HASH' && exists $success->{error} ) ) { die "This doesn't seem right"; }
     return $success;
+}
+
+sub make_daemon {
+    eval {
+        chdir( '/' ) or die( "Can't chdir to /: $!" );
+        defined( my $pid = fork() ) or die( "Can't fork: $!" );
+        if ( $pid ) {
+            exit( 0 );
+        }
+        setsid() or die( "Can't start a new session: $!" );
+        open( STDIN,  '</dev/null' ) or die( "Can't read /dev/null: $!" );
+        open( STDOUT, '>/dev/null' ) or die( "Can't write to /dev/null: $!" );
+        open( STDERR, '>/dev/null' ) or die( "Can't write to /dev/null: $!" );
+    };
+    if ( $@ ) {
+        warn $@;
+        exit( 2 );
+    }
 }
 

@@ -424,7 +424,7 @@ keys:
 
 =over 4
 
-=item sl
+=item sh
 
 The high 32-bits of the destination address.
 
@@ -521,9 +521,8 @@ sub _rx_no_queue {
 
 =head2 rx
 
-Accepts no parameters. Receives a packet from the XBee module. This packet
-may be a transmission from a remote XBee node or a control packet from the
-local XBee module.
+Receives a packet from the XBee module. This packet may be a transmission from
+a remote XBee node or a control packet from the local XBee module.
 
 If no packet is received before the timeout period expires, undef is returned.
 
@@ -531,6 +530,10 @@ Returned packets will be as a hashref of the packet data, broken out by key for
 easy access. Note, as this module is a work in progress, not every XBee packet
 type is supported. Callers should check the "api_type" key to determine the
 type of the received packet.
+
+Accepts a single parameter, a flag indicating the received frame ID should NOT
+be freed automatically. See L<rx_frame_id> for why you might want to use this
+flag.
 
 =cut
 
@@ -543,10 +546,17 @@ sub rx {
 
 =head2 rx_frame_id
 
-Accepts a single parameter: the frame id number to receive.
+Like L<rx> but only returns the packet with the requested frame ID number If no
+packet with the specified frame ID is received within the object's configured
+packet_timeout time, undef will be returned. Any other packets received will be
+enqueued for later processing by another rx function.
 
-Like L<rx> but only returns the packet with the requested frame id number (or
-or undef on failure).
+Accepts two parameters, the first being the desired frame ID and the second a
+flag denoting  this frame ID should NOT be automatically freed after it is
+received. In cases where multiple frames with the same ID are expected to be
+returned (such as after an AT ND command), it is preferable to set this flag to
+a true value and continue to call rx_frame_id until undef is returned, and then
+free the ID via L<free_frame_id>.
 
 =cut
 
@@ -585,7 +595,7 @@ Performs a network node discovery via the ND 'AT' command.
 sub discover_network {
     my ( $self ) = @_;
     my $frame_id = $self->at('ND');
-    while( $self->rx_frame_id( $frame_id, 1 ) ) { }
+    while( defined $self->rx_frame_id( $frame_id, 1 ) ) { }
     $self->free_frame_id( $frame_id );
 }
 
@@ -595,7 +605,7 @@ sub discover_network {
 
 sub node_info {
     my ( $self, $node ) = @_;
-    if ( !$node->{sn} ) { $node->{sn} = $node->{sh} . '_' . $node->{sl} }
+    $node->{sn} = __node_sn( $node );
     return $self->{known_nodes}->{$node->{sn}};
 }
 
@@ -617,9 +627,11 @@ sub known_nodes {
     return $self->{known_nodes};
 }
 
+### Private methods
+
 sub _add_known_node {
     my ( $self, $node ) = @_;
-    my $sn = $node->{sn} || ( $node->{sh} . '_' . $node->{sl} );
+    my $sn = __node_sn( $node );
     $self->_prune_known_nodes();
     # Update the node in-place in case someone else is holding onto a
     # reference.
@@ -651,6 +663,14 @@ sub _prune_known_nodes {
             delete $self->{known_nodes}->{$sn};
         }
     }
+}
+
+### Private functions
+
+sub __node_sn {
+    my ( $node ) = @_;
+    if ( $node->{sn} ) { return $node->{sn} };
+    return $node->{sh} . '_' . $node->{sl};
 }
 
 =head1 CHANGES
