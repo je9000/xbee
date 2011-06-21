@@ -192,7 +192,7 @@ sub new {
 
     if ( ref $self->{fh} ne 'Device::SerialPort' ) {
         $self->{fh_sel} = IO::Select->new( $self->{fh} )
-            || die "Failed to initialize IO::Select!";
+         || die "Failed to initialize IO::Select!";
     }
 
     bless $self, $class;
@@ -436,8 +436,7 @@ sub remote_at {
     if ( !$tx && !$data ) { die "Invalid parameters"; }
     if ( !defined $tx && defined $data ) {
         $tx = {};
-    }
-    elsif ( ref $tx ne 'HASH' ) {
+    } elsif ( ref $tx ne 'HASH' ) {
         $data = $tx;
         $tx   = {};
     }
@@ -458,32 +457,25 @@ sub remote_at {
     my ( $ack, $chg, $timeout );
     if ( !defined $tx->{disable_ack} ) {
         $ack = 0x00;
-    }
-    else {
+    } else {
         $ack = 0x01;
     }
     if ( defined $tx->{apply_changes} ) {
         $chg = 0x02;
-    }
-    else {
+    } else {
         $chg = 0x00;
     }
     if ( defined $tx->{extended_xmit_timeout} ) {
         $timeout = 0x40;
-    }
-    else {
+    } else {
         $timeout = 0x00;
     }
     my $options = $ack + $chg + $timeout;
 
     $data = '' unless $data;
     my $frame_id = $self->alloc_uart_frame_id();
-    my $tx_req   = pack( 'CNNnC',
-        $frame_id, $tx->{sh}, $tx->{sl}, $tx->{na}, $options );
-    $self->send_packet(
-        XBEE_API_TYPE__REMOTE_COMMAND_REQUEST,
-        $tx_req . $command . pack( "C", $data )
-    );
+    my $tx_req = pack( 'CNNnC', $frame_id, $tx->{sh}, $tx->{sl}, $tx->{na}, $options );
+    $self->send_packet( XBEE_API_TYPE__REMOTE_COMMAND_REQUEST, $tx_req . $command . pack( "C", $data ) );
     return $frame_id;
 }
 
@@ -695,7 +687,7 @@ sub node_info {
     my $sn = __node_sn( $node );
     if ( !$sn ) { return undef; }
     $node->{sn} = $sn;
-    return $self->{known_nodes}->{ $sn };
+    return $self->{known_nodes}->{$sn};
 }
 
 =head2 known_nodes
@@ -746,15 +738,15 @@ sub _add_known_node {
         $sknsn->{last_seen_time} = time();
     } else {
         $self->{known_nodes}->{$sn} = {
-            sn => $sn,
-            sh => $node->{sh},
-            sl => $node->{sl},
-            na => $node->{my} || $node->{na},
-            ni => $node->{ni},
-            profile_id => $node->{profile_id},
-            device_type => $node->{device_type},
+            sn              => $sn,
+            sh              => $node->{sh},
+            sl              => $node->{sl},
+            na              => $node->{my} || $node->{na},
+            ni              => $node->{ni},
+            profile_id      => $node->{profile_id},
+            device_type     => $node->{device_type},
             manufacturer_id => $node->{manufacturer_id},
-            last_seen_time => time(),
+            last_seen_time  => time(),
         };
     }
 }
@@ -777,13 +769,13 @@ sub _prune_known_nodes {
 
 sub __node_sn {
     my ( $node ) = @_;
-    if ( $node->{sn} ) { return $node->{sn} }
+    if ( $node->{sn} )  { return $node->{sn} }
     if ( !$node->{sh} ) { return undef; }
     return $node->{sh} . '_' . $node->{sl};
 }
 
 sub __get_bits {
-    my ($int) = @_;
+    my ( $int ) = @_;
     my $and = 0x80;
     my @list;
     my $any_hits = 0;
