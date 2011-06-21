@@ -29,6 +29,7 @@ sub on_exit {
 
 $SIG{INT} = \&on_exit;
 $SIG{TERM} = \&on_exit;
+$SIG{PIPE} = 'IGNORE';
 
 my $ui_options = [
     { name => 'help', abbr => '?', descr => 'This message.', exists => 1 },
@@ -108,9 +109,10 @@ my $ui_options = [
 ];
 
 my $node_aliases;
+my $do_daemon;
 {
     my $node_alias_file;
-    die unless GetOptions( 'node-alias-file:s' => \$node_alias_file );
+    die unless GetOptions( 'node-alias-file:s' => \$node_alias_file, 'daemon' => \$do_daemon );
     if ( $node_alias_file ) {
         $node_aliases = YAML::LoadFile( $node_alias_file ) || die "Failed to read node alias file: $!";
         if ( ref $node_aliases ne 'HASH' ) { die "Node alias file appears invalid."; }
@@ -156,10 +158,12 @@ sub init_serial {
 my $serial_port_device = init_serial( $serial_port_device_path );
 
 my $api = Device::XBee::API::Power->new( { fh => $serial_port_device, async => 1, packet_timeout => 10 } ) || die $!;
-umask 0227;
+umask 0117;
 $sock = IO::Socket::UNIX->new( Type => SOCK_STREAM, Local => zpdapp::COM_SOCKET_PATH, Listen => 10 ) || die $!;
 my $sel = IO::Select->new( $sock, $serial_port_device->{FD} ) || die $!;
 my %clients;
+
+make_daemon() if $do_daemon;
 
 while ( my @ready = $sel->can_read() ) {
     foreach my $r ( @ready ) {
@@ -198,7 +202,7 @@ die "Should not be here!";
 sub sn_or_alias_to_addrs {
     my ( $sn ) = @_;
     if ( $node_aliases->{$sn} ) {
-        return $node_aliases->{$sn}->{addr_h}, $node_aliases->{$sn}->{addr_l};
+        return $node_aliases->{$sn}->{sh}, $node_aliases->{$sn}->{sl};
     }
     if ( $sn !~ /^\d+_\d+$/ ) { return; }
     return split( /_/, $sn );
@@ -260,9 +264,9 @@ sub parse_command {
                 if ( $config->{discover} ) {
                     $api->discover_network();
                 }
-                return [$api->known_nodes()];
+                return { known_nodes => [$api->known_nodes()] };
             } elsif ( $config->{clients} ) {
-                return [keys %clients];
+                return {%clients};
             } elsif ( $config->{aliases} ) {
                 return $node_aliases;
             }
@@ -286,7 +290,7 @@ sub parse_command {
                 die "Operation failed";
             } else {
                 $pending_power_events{$t} = $client;
-                return { id => $t };
+                return { tx_id => $t };
             }
 
         } elsif ( $op eq 'sensor' ) {
@@ -297,7 +301,7 @@ sub parse_command {
                 die "Operation failed";
             } else {
                 $pending_power_events{$t} = $client;
-                return { id => $t };
+                return { tx_id => $t };
             }
 
         } elsif ( $op eq 'ping' ) {
@@ -308,7 +312,7 @@ sub parse_command {
                 die "Operation failed";
             } else {
                 $pending_power_events{$t} = $client;
-                return { id => $t };
+                return { tx_id => $t };
             }
         }
 
@@ -317,7 +321,7 @@ sub parse_command {
     if ( !defined $success ) {
         return { error => $@ };
     }
-    if ( ref $success eq '' || ( ref $success eq 'HASH' && exists $success->{error} ) ) { die "This doesn't seem right"; }
+    if ( ref $success eq '' || ref $success ne 'HASH' || exists $success->{error} ) { die "This doesn't seem right"; }
     return $success;
 }
 

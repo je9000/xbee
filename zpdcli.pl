@@ -78,7 +78,7 @@ while ( my @ready = $sel->can_read() ) {
 
             if ( @commands ) {
                 $read = YAML::Load( $read );
-                if ( ref $read eq 'HASH' && !exists $read->{id} ) {
+                if ( ref $read eq 'HASH' && !exists $read->{tx_id} ) {
                     if ( !defined $exit_with && !defined $exit_print ) { exit 0; }
                     if ( !ref $read->{power} eq 'HASH' ) { exit 255; }
                     if ( defined $exit_print && defined $read->{power}->{$exit_print} ) {
