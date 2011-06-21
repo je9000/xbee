@@ -7,6 +7,7 @@ our ( @ISA, @EXPORT_OK, %EXPORT_TAGS );
 
 our $VERSION = 0.3;
 
+use IO::Select;
 use constant 1.01;
 use constant XBEE_API_TYPE__MODEM_STATUS                             => 0x8A;
 use constant XBEE_API_TYPE__AT_COMMAND                               => 0x08;
@@ -75,10 +76,9 @@ A basic example:
  $serial_port_device->read_const_time( 1000 );    # 1 second per unfulfilled "read" call
 
  my $api = Device::XBee::API->new( { fh => $serial_port_device } ) || die $!;
- die "Failed to transmit" unless $api->tx(
-    { sh => 0, sl => 0 },
-    'hello world!'
- );
+ if ( !$api->tx( { sh => 0, sl => 0 }, 'hello world!' ) {
+     die "Transmit failed!";
+ }
  my $rx = $api->rx();
  die Dumper($rx);
 
@@ -146,7 +146,7 @@ complete. Smaller values cause the module to wait less time for a packet to be
 received by the XBee module. Setting this value too low will cause timeouts to
 be reported in situations where the network is "slow".
 
-When using standard filehandles, the timeout is implemented via alarm(). When
+When using standard filehandles, the timeout is implemented via select(). When
 using a Device::SerialPort object, the timeout is done via Device::SerialPort's
 read() method, and will expect the object to be configured with a
 read_char_time of 0 and a read_const_time of 1000.
@@ -157,6 +157,23 @@ If a node has not been heard from in this time, it will be "forgotten" and
 removed from the list of known nodes. Defaults to one hour. See L<known_nodes>
 for details.
 
+=head3 auto_reuse_frame_id
+
+All sent packets need a frame ID to uniquely identify them. There are only 254
+available IDs and thus there can only be 254 outstanding commands sent to the
+XBee. Normally frame IDs will be freed and reused once a command reply is
+received, however there are scenarios where this can not be done (generally
+those that involve local or remote AT commands, sleeping/offline nodes, etc).
+
+Normally, when no frame IDs are available but one is needed, the module will
+die with an error and the send attempt will be aborted. This condition could be
+trapped by the caller (via eval) to retry later, or could be treated as fatal.
+
+With this flag set, instead of dieing, the oldest frame ID will be reused. This
+will help work around any issues with frame ID's "leaking", but could cause odd
+behavior in cases where all outstanding frame IDs are still in use. This option
+should be used with caution.
+
 =cut
 
 sub new {
@@ -164,13 +181,19 @@ sub new {
     my $self = {};
 
     die "Missing file handle!" unless $options->{'fh'};
+    $self->{fh}                  = $options->{fh};
+    $self->{packet_wait_time}    = $options->{packet_timeout} || 20;
+    $self->{node_forget_time}    = $options->{node_forget_time} || 60 * 60;
+    $self->{auto_reuse_frame_id} = $options->{auto_reuse_frame_id} ? 1 : 0;
 
-    $self->{packet_wait_time}      = $options->{packet_timeout} || 20;
-    $self->{node_forget_time}      = $options->{node_forget_time} || 60 * 60;
     $self->{in_flight_uart_frames} = {};
     $self->{known_nodes}           = {};
     $self->{rx_queue}              = [];
-    $self->{port}                  = $options->{'fh'};
+
+    if ( ref $self->{fh} ne 'Device::SerialPort' ) {
+        $self->{fh_sel} = IO::Select->new( $self->{fh} )
+            || die "Failed to initialize IO::Select!";
+    }
 
     bless $self, $class;
     return $self;
@@ -183,9 +206,9 @@ sub read_bytes {
     my $buffer  = '';
     my $timeout = $self->{packet_wait_time};
 
-    if ( ref $self->{port} eq 'Device::SerialPort' ) {
+    if ( !$self->{fh_sel} ) {
         while ( $timeout > 0 ) {
-            my ( $count, $saw ) = $self->{port}->read( $to_read );    # will read _up to_ 255 chars
+            my ( $count, $saw ) = $self->{fh}->read( $to_read );    # will read _up to_ 255 chars
             if ( $count > 0 ) {
                 $chars += $count;
                 $buffer .= $saw;
@@ -196,22 +219,22 @@ sub read_bytes {
         }
     } else {
         my $read;
-        eval {
-            $SIG{ALRM} = sub { die "a\n"; };
-            while ( $to_read > 0 ) {
-                alarm( $timeout );
-                my $c = sysread( $self->{port}, $read, $to_read );
-                if ( $c ) {
-                    $buffer .= $read;
-                    $to_read -= $c;
-                } else {
-                    alarm( 0 );
-                    return undef;
-                }
+        my $start_ts = time();
+        while ( $to_read > 0 ) {
+            if ( !$self->{fh_sel}->can_read( $timeout ) ) {
+                return undef;
             }
-            alarm( 0 );
-        };
-        if ( !$@ ) { return $buffer; }
+            my $c = sysread( $self->{fh}, $read, $to_read );
+            if ( $c ) {
+                $buffer .= $read;
+                $to_read -= $c;
+                $timeout = $self->{packet_wait_time} - ( time() - $start_ts );
+                if ( $timeout < 1 && $to_read > 0 ) { return undef; }
+            } else {
+                return undef;
+            }
+        }
+        return $buffer;
     }
     return undef;
 }
@@ -245,54 +268,6 @@ sub read_packet {
     return ( $packet_api_id, $packet_data );
 }
 
-sub parse_at_nd_response {
-    my ( $self, $r ) = @_;
-    (
-        $r->{my},
-        $r->{sh},
-        $r->{sl},
-        $r->{ni},
-        $r->{parent_network_address},
-        $r->{device_type},
-        # This byte is reserved, so ignore it. If we restore it, be careful because
-        # upper layers also have an element named 'status'.
-        undef,    #$r->{status},
-        $r->{profile_id},
-        $r->{manufacturer_id},
-    ) = unpack( 'nNNZ*nCCnna*', $r->{data} );
-}
-
-sub parse_at_command_response {
-    my ( $self, $api_data ) = @_;
-
-    my @u = unpack( 'Ca[2]Ca*', $api_data );
-
-    my $r = {
-        frame_id             => $u[0],
-        command              => $u[1],
-        status               => $u[2],
-        data                 => $u[3],
-        is_ok                => $u[2] == 0,
-        is_error             => $u[2] == 1,
-        is_invalid_command   => $u[2] == 2,
-        is_invalid_parameter => $u[2] == 3,
-    };
-
-    if ( $r->{command} eq 'ND' ) {
-        $self->parse_at_nd_response( $r );
-    } else {
-        if ( length( $r->{data} ) == 1 ) {
-            $r->{data_as_int} = unpack( 'C', $r->{data} );
-        } elsif ( length( $r->{data} ) == 2 ) {
-            $r->{data_as_int} = unpack( 'n', $r->{data} );
-        } elsif ( length( $r->{data} ) == 4 ) {
-            $r->{data_as_int} = unpack( 'N', $r->{data} );
-        }
-    }
-
-    return $r;
-}
-
 sub free_frame_id {
     my ( $self, $id ) = @_;
     delete $self->{in_flight_uart_frames}->{$id};
@@ -301,17 +276,26 @@ sub free_frame_id {
 # id 0 is special, don't allocate it. I don't know if we should die here or
 # return 0 on failure...
 sub alloc_frame_id {
-    my ( $self ) = @_;
-    my $start_id = int( rand( 255 ) ) + 1;
-    my $id = $start_id;
-    while (1) {
+    my ( $self )    = @_;
+    my $start_id    = int( rand( 255 ) ) + 1;
+    my $id          = $start_id;
+    my $oldest_time = 0xFFFFFFFF;
+    my $oldest_id;
+    while ( 1 ) {
         if ( !exists $self->{in_flight_uart_frames}->{$id} ) {
-            $self->{in_flight_uart_frames}->{$id} = 1;
+            $self->{in_flight_uart_frames}->{$id} = time();
             return $id;
+        } elsif ( $self->{in_flight_uart_frames}->{$id} < $oldest_time ) {
+            $oldest_time = $self->{in_flight_uart_frames}->{$id};
+            $oldest_id   = $id;
         }
         $id++;
         if ( $id > 255 ) { $id = 1; }
         if ( $id == $start_id ) {
+            if ( $self->{auto_reuse_frame_id} ) {
+                $self->{in_flight_uart_frames}->{$oldest_id} = time();
+                return $oldest_id;
+            }
             die "Unable to allocate frame id!";
         }
     }
@@ -323,43 +307,26 @@ sub parse_packet {
     my $r;
 
     if ( $api_id == XBEE_API_TYPE__AT_COMMAND_RESPONSE ) {
-        $r = $self->parse_at_command_response( $api_data );
+        $r = __parse_at_command_response( $api_data );
 
     } elsif ( $api_id == XBEE_API_TYPE__MODEM_STATUS ) {
-        @u = unpack( 'C', $api_data );
-        $r = {
-            status            => $u[1],
-            is_hardware_reset => $u[1] == 1,
-            is_wdt_reset      => $u[1] == 2,
-            is_associated     => $u[1] == 3,
-            is_disassociated  => $u[1] == 4,
-            is_sync_lost      => $u[1] == 5,
-            is_coord_realign  => $u[1] == 6,
-            is_coord_start    => $u[1] == 7,
-        };
+        $r = __parse_modem_status( $api_data );
 
     } elsif ( $api_id == XBEE_API_TYPE__ZIGBEE_RECEIVE_PACKET ) {
-        @u = unpack( 'NNnCa*', $api_data );
-        # sh sl and na are named to match the fields in a network discovery AT
-        # packet response
-        $r = {
-            sh              => $u[0],
-            sl              => $u[1],
-            na              => $u[2],
-            options         => $u[3],
-            data            => $u[4],
-            is_ack          => $u[3] & 0x01,
-            is_broadcast    => ( $u[3] & 0x02 ? 1 : 0 ),
-        };
+        $r = __parse_zigbee_receive_packet( $api_data );
+
     } elsif ( $api_id == XBEE_API_TYPE__ZIGBEE_TRANSMIT_STATUS ) {
-        @u = unpack( 'CnCCC', $api_data );
-        $r = {
-            frame_id         => $u[0],
-            remote_na        => $u[1],
-            tx_retry_count   => $u[2],
-            delivery_status  => $u[3],
-            discovery_status => $u[4]
-        };
+        $r = __parse_zigbee_transmit_status( $api_data );
+
+    } elsif ( $api_id == XBEE_API_TYPE__ZIGBEE_IO_DATA_SAMPLE_RX_INDICATOR ) {
+        $r = __parse_zigbee_io_data_sample_rx_indicator( $api_data );
+
+    } elsif ( $api_id == XBEE_API_TYPE__NODE_IDENTIFICATION_INDICATOR ) {
+        $r = __parse_node_identification_indicator( $api_data );
+
+    } elsif ( $api_id == XBEE_API_TYPE__REMOTE_COMMAND_RESPONSE ) {
+        $r = __parse_remote_command_response( $api_data );
+
     } elsif ( XBEE_API_TYPE_TO_STRING->{$api_id} ) {
         warn "No code to handle this packet: " . XBEE_API_TYPE_TO_STRING->{$api_id};
     } else {
@@ -386,10 +353,10 @@ sub send_packet {
     }
     $checksum = pack( 'C', 0xFF - ( $checksum & 0xFF ) );
 
-    if ( ref $self->{port} eq 'Device::SerialPort' ) {
-        $self->{port}->write( $xbee_data . $data . $checksum );
+    if ( !$self->{fh_sel} ) {
+        $self->{fh}->write( $xbee_data . $data . $checksum );
     } else {
-        syswrite( $self->{port}, $xbee_data . $data . $checksum );
+        syswrite( $self->{fh}, $xbee_data . $data . $checksum );
     }
 }
 
@@ -402,7 +369,10 @@ commands and expected data for each.
 
 Returns the frame ID sent for this packet. This method does not wait for a
 reply from the XBee, as the expected reply is dependent on the AT command sent.
-To retrieve the reply (if any), call rx().
+To retrieve the reply (if any), call one of the L<rx> methods.
+
+If no reply is expected, the caller should immediately free the returned frame
+ID via L<free_frame_id> to prevent frame ID leaks.
 
 =cut
 
@@ -414,10 +384,13 @@ sub at {
     return $frame_id;
 }
 
-=head2 tx
+=head2 remote_at
 
-Sends a transmit request to the XBee. Accepts two parameters, the first is the
-endpoint address and the second the data to be sent.
+Send an AT command to a remote module. Accepts three parameters: a hashref with
+endpoint addresses, command options, frame_id; the AT command name (as
+two-character string); and the third as the expected data for that command (if
+any). See the XBee datasheet for a list of supported AT commands and expected
+data for each.
 
 Endpoint addresses should be specified as a hashref containing the following
 keys:
@@ -432,20 +405,132 @@ The high 32-bits of the destination address.
 
 The low 32-bits of the destination address.
 
-=item dest_na
+=item na
 
 The destination network address.
 
+=item disable_ack
+
+If included ack is disabled
+
+=item apply_changes
+
+If included changes applied immediate, if missing an AC command must be sent to
+apply changes
+
+=item extended_xmit_timeout
+
+If included the exteded transmission timeout is used
+
 =back
+
+Returns the frame ID sent for this packet. To retrieve the reply (if any), call
+one of the L<rx> methods. If no reply is expected, the caller should immediately
+free the returned frame ID via L<free_frame_id> to prevent frame ID leaks.
+
+=cut
+
+sub remote_at {
+    my ( $self, $tx, $command, $data ) = @_;
+    my @my_rx_queue;
+    if ( !$tx && !$data ) { die "Invalid parameters"; }
+    if ( !defined $tx && defined $data ) {
+        $tx = {};
+    }
+    elsif ( ref $tx ne 'HASH' ) {
+        $data = $tx;
+        $tx   = {};
+    }
+
+    if (   ( $tx->{sh} && !$tx->{sl} )
+        || ( !$tx->{sh} && $tx->{sl} ) )
+    {
+        die "Invalid parameters";
+    }
+
+    if ( !defined $tx->{na} ) {
+        $tx->{na} = XBEE_API_BROADCAST_NA_UNKNOWN_ADDR;
+    }
+    if ( !defined $tx->{sh} ) {
+        $tx->{sh} = XBEE_API_BROADCAST_ADDR_H;
+        $tx->{sl} = XBEE_API_BROADCAST_ADDR_L;
+    }
+    my ( $ack, $chg, $timeout );
+    if ( !defined $tx->{disable_ack} ) {
+        $ack = 0x00;
+    }
+    else {
+        $ack = 0x01;
+    }
+    if ( defined $tx->{apply_changes} ) {
+        $chg = 0x02;
+    }
+    else {
+        $chg = 0x00;
+    }
+    if ( defined $tx->{extended_xmit_timeout} ) {
+        $timeout = 0x40;
+    }
+    else {
+        $timeout = 0x00;
+    }
+    my $options = $ack + $chg + $timeout;
+
+    $data = '' unless $data;
+    my $frame_id = $self->alloc_uart_frame_id();
+    my $tx_req   = pack( 'CNNnC',
+        $frame_id, $tx->{sh}, $tx->{sl}, $tx->{na}, $options );
+    $self->send_packet(
+        XBEE_API_TYPE__REMOTE_COMMAND_REQUEST,
+        $tx_req . $command . pack( "C", $data )
+    );
+    return $frame_id;
+}
+
+=head2 tx
+
+Sends a transmit request to the XBee. Accepts three parameters, the first is the
+endpoint address, the second is a scalar containing the data to be sent, and the
+third is an optional flag (known as the async flag) specifying whether or not
+the method should wait for an acknowledgement from the XBee.
+
+Endpoint addresses should be specified as a hashref containing the following
+keys:
+
+=over 4
+
+=item sh
+
+The high 32-bits of the destination address.
+
+=item sl
+
+The low 32-bits of the destination address.
+
+=item na
+
+The destination network address. If this is not specified, it will default to
+XBEE_API_BROADCAST_NA_UNKNOWN_ADDR.
+
+=back
+
+If both sh and sl are missing or the parameter is undefined,, they will default
+to XBEE_API_BROADCAST_ADDR_H and XBEE_API_BROADCAST_ADDR_L.
 
 The meaning of these addresses can be found in the XBee datasheet. Note: In
 the future, a Device::XBee::API::Node object will be an acceptable parameter.
 
-Return values depend on calling context. In scalar context, true or false will
-be returned representing transmission acknowledgement by the remote XBee
-device. In array context, the first return value is the delivery status (as
-set in the transmit status packet and documented in the datasheet), and the
-second is the actual transmit status packet (as a hashref) itself.
+If the async flag is not set, the method will wait for an acknowledgement packet
+from the XBee. Return values depend on calling context. In scalar context, true
+or false will be returned representing transmission acknowledgement by the
+remote XBee device. In array context, the first return value is the delivery
+status (as set in the transmit status packet and documented in the datasheet),
+and the second is the actual transmit status packet (as a hashref) itself.
+
+If the async flag is set, the method will not wait for an acknowledgement packet
+and the tx frame ID will be returned. The caller will need to then receive the
+transmit status packet (via one of the L<rx> methods) and free the frame ID (via
+L<free_frame_id>) manually.
 
 No retransmissions will be attempted by this module, but the XBee
 device itself will likely attempt retransmissions as per its configuration (and
@@ -458,7 +543,7 @@ subject to whether or not the packet was a "broadcast").
 # status and the transmit status packet as an array. Note: the actual delivery
 # status uses 0 (or false) to indicate success.
 sub tx {
-    my ( $self, $tx, $data ) = @_;
+    my ( $self, $tx, $data, $async ) = @_;
     my @my_rx_queue;
     if ( !$tx && !$data ) { die "Invalid parameters"; }
     if ( !defined $tx && defined $data ) {
@@ -477,14 +562,14 @@ sub tx {
     }
 
     my $frame_id = $self->alloc_frame_id();
-    my $tx_req =
-     pack( 'CNNnCC', $frame_id, $tx->{sh}, $tx->{sl}, $tx->{na}, 0, ( $tx->{broadcast} ? 0x8 : 0 ) );
+    my $tx_req = pack( 'CNNnCC', $frame_id, $tx->{sh}, $tx->{sl}, $tx->{na}, 0, ( $tx->{broadcast} ? 0x8 : 0 ) );
     $self->send_packet( XBEE_API_TYPE__ZIGBEE_TRANSMIT_REQUEST, $tx_req . $data );
     my $rx;
 
     # Wait until we get the send result message.
     $rx = $self->rx_frame_id( $frame_id );
     return undef unless defined $rx;
+    if ( $async ) { return $rx; }
 
     # Wonky return API.
     if ( wantarray ) {
@@ -533,7 +618,8 @@ type of the received packet.
 
 Accepts a single parameter, a flag indicating the received frame ID should NOT
 be freed automatically. See L<rx_frame_id> for why you might want to use this
-flag.
+flag (generally, cases when you expect multiple packets to arrive with the same
+frame ID).
 
 =cut
 
@@ -566,7 +652,7 @@ sub rx_frame_id {
     my $r;
     my $start_time = time();
 
-    while( 1 ) {
+    while ( 1 ) {
         $r = $self->rx( $dont_free_id );
         if ( $r ) {
             if ( $r->{frame_id} && $r->{frame_id} == $frame_id ) {
@@ -588,14 +674,15 @@ sub rx_frame_id {
 
 =head2 discover_network
 
-Performs a network node discovery via the ND 'AT' command.
+Performs a network node discovery via the ND 'AT' command. Blocks until no
+replies have been received in packet_timeout seconds.
 
 =cut
 
 sub discover_network {
     my ( $self ) = @_;
-    my $frame_id = $self->at('ND');
-    while( defined $self->rx_frame_id( $frame_id, 1 ) ) { }
+    my $frame_id = $self->at( 'ND' );
+    while ( defined $self->rx_frame_id( $frame_id, 1 ) ) { }
     $self->free_frame_id( $frame_id );
 }
 
@@ -605,8 +692,10 @@ sub discover_network {
 
 sub node_info {
     my ( $self, $node ) = @_;
-    $node->{sn} = __node_sn( $node );
-    return $self->{known_nodes}->{$node->{sn}};
+    my $sn = __node_sn( $node );
+    if ( !$sn ) { return undef; }
+    $node->{sn} = $sn;
+    return $self->{known_nodes}->{ $sn };
 }
 
 =head2 known_nodes
@@ -631,23 +720,42 @@ sub known_nodes {
 
 sub _add_known_node {
     my ( $self, $node ) = @_;
+
     my $sn = __node_sn( $node );
+    if ( !$sn ) { return; }
+
     $self->_prune_known_nodes();
+
     # Update the node in-place in case someone else is holding onto a
     # reference.
-    if ( $self->{known_nodes}->{ $sn } ) {
-        my $sknsn = $self->{known_nodes}->{ $sn };
+    if ( $self->{known_nodes}->{$sn} ) {
+        my $sknsn = $self->{known_nodes}->{$sn};
         # These are the only known values that should change for a node with a
         # given serial number. The rest are burned into the chip.
-        foreach my $k ( qw/ my ni profile_id / ) {
+        foreach my $k ( qw/ ni profile_id / ) {
             if ( !$sknsn->{$k} || $sknsn->{$k} ne $node->{$k} ) {
                 $sknsn->{$k} = $node->{$k};
             }
         }
+        if ( $node->{my} && $node->{my} != $sknsn->{na} ) {
+            $sknsn->{na} = $node->{my};
+        }
+        if ( $node->{na} && $node->{na} != $sknsn->{na} ) {
+            $sknsn->{na} = $node->{na};
+        }
         $sknsn->{last_seen_time} = time();
     } else {
-        $node->{last_seen_time} = time();
-        $self->{known_nodes}->{$sn} = $node;
+        $self->{known_nodes}->{$sn} = {
+            sn => $sn,
+            sh => $node->{sh},
+            sl => $node->{sl},
+            na => $node->{my} || $node->{na},
+            ni => $node->{ni},
+            profile_id => $node->{profile_id},
+            device_type => $node->{device_type},
+            manufacturer_id => $node->{manufacturer_id},
+            last_seen_time => time(),
+        };
     }
 }
 
@@ -655,7 +763,7 @@ sub _prune_known_nodes {
     my ( $self ) = @_;
     my $now = time();
     my @saved_nodes;
-    while( my ( $sn, $node ) = each( %{ $self->{known_nodes} } ) ) {
+    while ( my ( $sn, $node ) = each( %{ $self->{known_nodes} } ) ) {
         if ( $now - $node->{last_seen_time} > $self->{node_forget_time} ) {
             # Set just in case a caller has held onto the reference for
             # something.
@@ -669,11 +777,228 @@ sub _prune_known_nodes {
 
 sub __node_sn {
     my ( $node ) = @_;
-    if ( $node->{sn} ) { return $node->{sn} };
+    if ( $node->{sn} ) { return $node->{sn} }
+    if ( !$node->{sh} ) { return undef; }
     return $node->{sh} . '_' . $node->{sl};
 }
 
+sub __get_bits {
+    my ($int) = @_;
+    my $and = 0x80;
+    my @list;
+    my $any_hits = 0;
+    for ( 1 .. 8 ) {
+        if ( $int & $and ) {
+            # if the bit is set == 1
+            push @list, 1;
+            $any_hits = 1;
+        } else {
+            # if the bit is not set == 0
+            push @list, 0;
+        }
+
+        # shift the constant using right shift
+        $and = $and >> 1;
+    }
+    return ( $any_hits, @list );
+}
+
+sub __parse_at_command_response {
+    my ( $api_data ) = @_;
+
+    my @u = unpack( 'Ca[2]Ca*', $api_data );
+
+    my $r = {
+        frame_id             => $u[0],
+        command              => $u[1],
+        status               => $u[2],
+        data                 => $u[3],
+        is_ok                => $u[2] == 0,
+        is_error             => $u[2] == 1,
+        is_invalid_command   => $u[2] == 2,
+        is_invalid_parameter => $u[2] == 3,
+    };
+
+    if ( $r->{command} eq 'ND' ) {
+        (
+            $r->{my},           $r->{sh},                     $r->{sl},
+            $r->{ni},           $r->{parent_network_address}, $r->{device_type},
+            $r->{source_event}, $r->{profile_id},             $r->{manufacturer_id},
+        ) = unpack( 'nNNZ*nCCnna*', $r->{data} );
+    } else {
+        if ( length( $r->{data} ) == 1 ) {
+            $r->{data_as_int} = unpack( 'C', $r->{data} );
+        } elsif ( length( $r->{data} ) == 2 ) {
+            $r->{data_as_int} = unpack( 'n', $r->{data} );
+        } elsif ( length( $r->{data} ) == 4 ) {
+            $r->{data_as_int} = unpack( 'N', $r->{data} );
+        }
+    }
+
+    return $r;
+}
+
+sub __parse_modem_status {
+    my ( $api_data ) = @_;
+    my @u = unpack( 'C', $api_data );
+    return {
+        status            => $u[1],
+        is_hardware_reset => $u[1] == 1,
+        is_wdt_reset      => $u[1] == 2,
+        is_associated     => $u[1] == 3,
+        is_disassociated  => $u[1] == 4,
+        is_sync_lost      => $u[1] == 5,
+        is_coord_realign  => $u[1] == 6,
+        is_coord_start    => $u[1] == 7,
+    };
+}
+
+sub __parse_zigbee_receive_packet {
+    my ( $api_data ) = @_;
+    my @u = unpack( 'NNnCa*', $api_data );
+    # sh sl and na are named to match the fields in a network discovery AT
+    # packet response
+    return {
+        sh           => $u[0],
+        sl           => $u[1],
+        na           => $u[2],
+        options      => $u[3],
+        data         => $u[4],
+        is_ack       => $u[3] & 0x01,
+        is_broadcast => ( $u[3] & 0x02 ? 1 : 0 ),
+    };
+}
+
+sub __parse_zigbee_transmit_status {
+    my ( $api_data ) = @_;
+    my @u = unpack( 'CnCCC', $api_data );
+    return {
+        frame_id         => $u[0],
+        remote_na        => $u[1],
+        tx_retry_count   => $u[2],
+        delivery_status  => $u[3],
+        discovery_status => $u[4]
+    };
+}
+
+sub __parse_zigbee_io_data_sample_rx_indicator {
+    my ( $api_data ) = @_;
+    my @u    = unpack( 'NNnCCCCCa*', $api_data );
+    my $data = $u[8];
+    my $r    = {
+        sh             => $u[0],
+        sl             => $u[1],
+        na             => $u[2],
+        options        => $u[3],
+        is_ack         => $u[3] & 0x01,
+        is_broadcast   => ( $u[3] & 0x02 ? 1 : 0 ),
+        number_samples => $u[4],
+        data => unpack( "h*", $data )
+    };
+
+    my ( $any_d1, $any_d2, $any_a );
+    my @bits;
+    ( $any_d1, @bits ) = __get_bits( $u[5] );
+    $r->{"digital_channel_first"} = [@bits];
+    ( $any_d2, @bits ) = __get_bits( $u[6] );
+    $r->{"digital_channel_second"} = [@bits];
+    ( $any_a, @bits ) = __get_bits( $u[7] );
+    $r->{"analog_channel_bits"} = [@bits];
+    my @digital;
+
+    # do we need grab the digital 16 bits?
+    if ( $any_d1 + $any_d2 ) {
+        my ( $d1, $d2 );
+        ( $d1, $d2, $data ) = unpack( "CCa*", $data );
+        my $trash;
+        my @digital_status;
+        my @digital;
+        ( $trash, @digital_status ) = __get_bits( $d1 );
+        if ( $r->{"digital_channel_first"}[3] == 1 ) {
+            $digital[12] = $digital_status[3];
+        }
+        if ( $r->{"digital_channel_first"}[4] == 1 ) {
+            $digital[11] = $digital_status[4];
+        }
+        if ( $r->{"digital_channel_first"}[5] == 1 ) {
+            $digital[10] = $digital_status[5];
+        }
+        ( $trash, @digital_status ) = __get_bits( $d2 );
+        my $d_number = 7;
+        for ( my $i = 0; $i < 8; $i++ ) {
+            if ( $r->{"digital_channel_second"}[$i] == 1 ) {
+                $digital[$d_number] = $digital_status[$i];
+            }
+            $d_number--;
+        }
+        $r->{"digital_inputs"} = \@digital;
+    }
+
+    # now get the analog values, if any
+    my @analog;
+    for ( my $i = 7; $i >= 0; $i-- ) {
+        if ( $r->{"analog_channel_bits"}[$i] == 1 ) {
+            ( $analog[7 - $i], $data ) = unpack( 'na*', $data );
+        }
+    }
+    $r->{"analog_inputs"} = \@analog;
+    return $r;
+}
+
+sub __parse_node_identification_indicator {
+    my ( $api_data ) = @_;
+    my @u = unpack( 'NNnCnNNZ*nCCnn', $api_data );
+    return {
+        source_sh       => $u[0],
+        source_sl       => $u[1],
+        source_na       => $u[2],
+        options         => $u[3],
+        is_ack          => $u[3] & 0x01,
+        is_broadcast    => ( $u[3] & 0x02 ? 1 : 0 ),
+        remote_na       => $u[4],
+        remote_sh       => $u[5],
+        remote_sl       => $u[6],
+        ni_string       => $u[7],
+        parent_address  => $u[8],
+        device_type     => $u[9],
+        source_event    => $u[10],
+        digi_profile_id => $u[11],
+        mfg_id          => $u[12]
+    };
+}
+
+sub __parse_remote_command_response {
+    my ( $api_data ) = @_;
+    my @u = unpack( 'CNNna[2]Ca*', $api_data );
+    return {
+        frame_id                  => $u[0],
+        sh                        => $u[1],
+        sl                        => $u[2],
+        na                        => $u[3],
+        command                   => $u[4],
+        status                    => $u[5],
+        data                      => $u[6],
+        is_ok                     => $u[5] == 0,
+        is_error                  => $u[5] == 1,
+        is_invalid_command        => $u[5] == 2,
+        is_invalid_parameter      => $u[5] == 3,
+        is_remote_cmd_xmit_failed => $u[5] == 4,
+    };
+}
+
 =head1 CHANGES
+
+=head2 0.3, 20110621 - jeagle, jdodgen
+
+Change from internal Device::SerialPort wrapper to accepting an fh.
+
+Add asynchronous support to tx and add some helpful methods to support it.
+
+Handle more command types (remote AT, ZigBee IO, node identification).
+
+Add an option to re-use frame IDs under high tx load.
+
+Many more changes!
 
 =head2 0.2, 20101206 - jeagle
 

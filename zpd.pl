@@ -127,6 +127,8 @@ my $node_aliases;
                 }
             }
         }
+    } else {
+        $node_aliases = {};
     }
 }
 

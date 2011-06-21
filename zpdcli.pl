@@ -78,7 +78,7 @@ while ( my @ready = $sel->can_read() ) {
 
             if ( @commands ) {
                 $read = YAML::Load( $read );
-                if ( !exists $read->{id} ) {
+                if ( ref $read eq 'HASH' && !exists $read->{id} ) {
                     if ( !defined $exit_with && !defined $exit_print ) { exit 0; }
                     if ( !ref $read->{power} eq 'HASH' ) { exit 255; }
                     if ( defined $exit_print && defined $read->{power}->{$exit_print} ) {
@@ -92,6 +92,9 @@ while ( my @ready = $sel->can_read() ) {
                         exit $read->{power}->{$exit_with};
                     }
                     exit 255;    # Something went wrong with exit_with
+                } elsif ( ref $read ne 'HASH' ) {
+                    # Don't know what else we would do with these types...
+                    exit 0;
                 }
             }
 
