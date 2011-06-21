@@ -156,6 +156,7 @@ sub init_serial {
 my $serial_port_device = init_serial( $serial_port_device_path );
 
 my $api = Device::XBee::API::Power->new( { fh => $serial_port_device, async => 1, packet_timeout => 10 } ) || die $!;
+umask 0227;
 $sock = IO::Socket::UNIX->new( Type => SOCK_STREAM, Local => zpdapp::COM_SOCKET_PATH, Listen => 10 ) || die $!;
 my $sel = IO::Select->new( $sock, $serial_port_device->{FD} ) || die $!;
 my %clients;
