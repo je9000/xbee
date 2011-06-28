@@ -33,7 +33,7 @@ $SIG{PIPE} = 'IGNORE';
 
 my $ui_options = [
     { name => 'help', abbr => '?', descr => 'This message.', exists => 1 },
-    #{   name => 'exit', descr => 'Exit.', exists => 1 },
+    {   name => 'exit', descr => 'Exit.', exists => 1 },
     {
         name  => 'ping',
         descr => 'Ping a node.',

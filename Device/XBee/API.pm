@@ -433,6 +433,7 @@ free the returned frame ID via L<free_frame_id> to prevent frame ID leaks.
 sub remote_at {
     my ( $self, $tx, $command, $data ) = @_;
     my @my_rx_queue;
+    if ( !$command ) { die "Invalid parameters"; }
     if ( !$tx && !$data ) { die "Invalid parameters"; }
     if ( !defined $tx && defined $data ) {
         $tx = {};
@@ -472,10 +473,10 @@ sub remote_at {
     }
     my $options = $ack + $chg + $timeout;
 
-    $data = '' unless $data;
-    my $frame_id = $self->alloc_uart_frame_id();
+    $data = '' unless defined $data;
+    my $frame_id = $self->alloc_frame_id();
     my $tx_req = pack( 'CNNnC', $frame_id, $tx->{sh}, $tx->{sl}, $tx->{na}, $options );
-    $self->send_packet( XBEE_API_TYPE__REMOTE_COMMAND_REQUEST, $tx_req . $command . pack( "C", $data ) );
+    $self->send_packet( XBEE_API_TYPE__REMOTE_COMMAND_REQUEST, $tx_req . $command . $data );
     return $frame_id;
 }
 
@@ -729,19 +730,14 @@ sub _add_known_node {
                 $sknsn->{$k} = $node->{$k};
             }
         }
-        if ( $node->{my} && $node->{my} != $sknsn->{na} ) {
-            $sknsn->{na} = $node->{my};
-        }
-        if ( $node->{na} && $node->{na} != $sknsn->{na} ) {
-            $sknsn->{na} = $node->{na};
-        }
+        $sknsn->{na} = $node->{na} || $node->{my};
         $sknsn->{last_seen_time} = time();
     } else {
         $self->{known_nodes}->{$sn} = {
             sn              => $sn,
             sh              => $node->{sh},
             sl              => $node->{sl},
-            na              => $node->{my} || $node->{na},
+            na              => $node->{na} || $node->{my},
             ni              => $node->{ni},
             profile_id      => $node->{profile_id},
             device_type     => $node->{device_type},
@@ -813,10 +809,14 @@ sub __parse_at_command_response {
 
     if ( $r->{command} eq 'ND' ) {
         (
-            $r->{my},           $r->{sh},                     $r->{sl},
+            $r->{na},           $r->{sh},                     $r->{sl},
             $r->{ni},           $r->{parent_network_address}, $r->{device_type},
             $r->{source_event}, $r->{profile_id},             $r->{manufacturer_id},
         ) = unpack( 'nNNZ*nCCnna*', $r->{data} );
+        # The ND API calls it "my" but it's "na" everywhere else. Provide both
+        # because the user may expect to see "my" after this packet arrives.
+        # This module only uses "na".
+        $r->{my} = $r->{na};
     } else {
         if ( length( $r->{data} ) == 1 ) {
             $r->{data_as_int} = unpack( 'C', $r->{data} );
@@ -950,11 +950,11 @@ sub __parse_node_identification_indicator {
         remote_na       => $u[4],
         remote_sh       => $u[5],
         remote_sl       => $u[6],
-        ni_string       => $u[7],
+        ni              => $u[7],
         parent_address  => $u[8],
         device_type     => $u[9],
         source_event    => $u[10],
-        digi_profile_id => $u[11],
+        profile_id      => $u[11],
         mfg_id          => $u[12]
     };
 }
