@@ -252,7 +252,10 @@ sub read_packet {
     my ( $packet_data_length ) = unpack( 'n', $d );
 
     $d = $self->read_bytes( $packet_data_length + 1 );
-    die unless $d;
+    if ( !$d ) {
+        #warn "Read a partial packet!";
+        return undef;
+    }
     $packet_data_length--;
     my ( $packet_api_id, $packet_data, $packet_checksum ) = unpack( "Ca[$packet_data_length]C", $d );
     my $validate_checksum = $packet_api_id + $packet_checksum;
@@ -261,7 +264,7 @@ sub read_packet {
     }
 
     if ( ( $validate_checksum & 0xFF ) != 0xFF ) {
-        warn "Invalid checksum!";
+        #warn "Invalid checksum!";
         return undef;
     }
 
@@ -726,7 +729,9 @@ sub _add_known_node {
         # These are the only known values that should change for a node with a
         # given serial number. The rest are burned into the chip.
         foreach my $k ( qw/ ni profile_id / ) {
-            if ( !$sknsn->{$k} || $sknsn->{$k} ne $node->{$k} ) {
+            if ( $node->{$k} &&
+                ( !$sknsn->{$k} || $sknsn->{$k} ne $node->{$k} )
+            ) {
                 $sknsn->{$k} = $node->{$k};
             }
         }
