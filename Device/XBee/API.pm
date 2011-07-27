@@ -696,7 +696,7 @@ sub node_info {
 
 =head2 known_nodes
 
-Returns a hashref of all known nodes indexed by their full serial number (AKA
+Returns a hashref of all known nodes indexed by their full serial number (i.e.
 $node->{sh} . '_' . $node->{sl}).  Nodes that haven't been heard from in the
 configured node_forget_time will be automatically removed from this list if
 they've not been heard from in that time. Nodes are added to that list when a
@@ -709,7 +709,7 @@ Note, the age-out mechanism may be susceptable to stepping of the system clock.
 sub known_nodes {
     my ( $self ) = @_;
     $self->_prune_known_nodes();
-    return $self->{known_nodes};
+    return { %{$self->{known_nodes}} };
 }
 
 ### Private methods

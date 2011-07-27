@@ -27,17 +27,15 @@ sub on_exit {
     exit 2;
 }
 
-$SIG{INT} = \&on_exit;
+$SIG{INT}  = \&on_exit;
 $SIG{TERM} = \&on_exit;
 $SIG{PIPE} = 'IGNORE';
 
 my $ui_options = [
-    { name => 'help', abbr => '?', descr => 'This message.', exists => 1 },
-    {   name => 'exit', descr => 'Exit.', exists => 1 },
-    {
-        name  => 'ping',
-        descr => 'Ping a node.',
-    },
+    { name => 'help',  abbr  => '?',     descr  => 'This message.', exists => 1 },
+    { name => 'exit',  descr => 'Exit.', exists => 1 },
+    { name => 'ping',  descr => 'Ping a node.', },
+    { name => 'query', descr => 'Query a node\'s power API details.', },
     {
         name   => 'show',
         descr  => 'Show stuff.',
@@ -172,7 +170,7 @@ while ( my @ready = $sel->can_read() ) {
             my $s = $sock->accept() || next;
             $sel->add( $s );
             $s->autoflush( 1 );
-            $clients{$s} = { unsolicited => 0, sock => $s };
+            $clients{$s} = { unsolicited => 0, sock => $s, connected_time => time() };
 
         } elsif ( $r == $serial_port_device->{FD} ) {
             $read = $api->rx();
@@ -264,9 +262,31 @@ sub parse_command {
                 if ( $config->{discover} ) {
                     $api->discover_network();
                 }
-                return { known_nodes => [$api->known_nodes()] };
+                my $h = $api->known_nodes();
+                foreach my $n ( values( %{$h} ) ) {
+                    foreach my $alias ( keys( %{$node_aliases} ) ) {
+                        if (   ( $n->{sh} eq $node_aliases->{$alias}->{sh} )
+                            && ( $n->{sl} eq $node_aliases->{$alias}->{sl} ) )
+                        {
+                            $n->{alias} = $alias;
+                            last;
+                        }
+                    }
+                }
+                return { known_nodes => $h };
             } elsif ( $config->{clients} ) {
-                return {%clients};
+                my %c;
+                while ( my ( $client_sock, $client_data ) = each( %clients ) ) {
+                    $c{"$client_sock"} = {};
+                    while ( my ( $k, $v ) = each( %{$client_data} ) ) {
+                        if ( $k eq 'sock' ) {
+                            $c{"$client_sock"}->{$k} = 'socket';
+                        } else {
+                            $c{"$client_sock"}->{$k} = $v;
+                        }
+                    }
+                }
+                return { clients => \%c };
             } elsif ( $config->{aliases} ) {
                 return $node_aliases;
             }
@@ -314,10 +334,22 @@ sub parse_command {
                 $pending_power_events{$t} = $client;
                 return { tx_id => $t };
             }
+
+        } elsif ( $op eq 'query' ) {
+            my ( $sh, $sl ) = sn_or_alias_to_addrs( $config->{query} );
+            die "Invalid target" unless defined $sl;
+            my $t = $api->query( { sh => $sh, sl => $sl } );
+            if ( !$t ) {
+                die "Operation failed";
+            } else {
+                $pending_power_events{$t} = $client;
+                return { tx_id => $t };
+            }
         }
 
         die "I don't know how to '$cmd'. Try 'help' for usage.";
     };
+
     if ( !defined $success ) {
         return { error => $@ };
     }
