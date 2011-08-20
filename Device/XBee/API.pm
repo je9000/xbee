@@ -823,16 +823,26 @@ sub __parse_at_command_response {
         # This module only uses "na".
         $r->{my} = $r->{na};
     } else {
-        if ( length( $r->{data} ) == 1 ) {
-            $r->{data_as_int} = unpack( 'C', $r->{data} );
-        } elsif ( length( $r->{data} ) == 2 ) {
-            $r->{data_as_int} = unpack( 'n', $r->{data} );
-        } elsif ( length( $r->{data} ) == 4 ) {
-            $r->{data_as_int} = unpack( 'N', $r->{data} );
-        }
+        $r->{data_as_int} = __data_to_int( $r->{data} );
     }
 
     return $r;
+}
+
+sub __data_to_int {
+    my ( $data ) = @_;
+
+    if ( length($data) == 1 ) {
+        return unpack( 'C', $data );
+    } elsif ( length( $data ) == 2 ) {
+        return unpack( 'n', $data );
+    } elsif ( length( $data ) == 4 ) {
+        return unpack( 'N', $data);
+    } elsif ( length( $data ) == 8 ) {                   
+        my ( $h, $l ) = unpack( 'NN', $data );
+        return ( $l | ( $h << 32 ) );
+    }
+    die 'Unsupported data type!';
 }
 
 sub __parse_modem_status {
@@ -975,6 +985,7 @@ sub __parse_remote_command_response {
         command                   => $u[4],
         status                    => $u[5],
         data                      => $u[6],
+        data_as_int               => __data_to_int( $u[6] ),
         is_ok                     => $u[5] == 0,
         is_error                  => $u[5] == 1,
         is_invalid_command        => $u[5] == 2,
