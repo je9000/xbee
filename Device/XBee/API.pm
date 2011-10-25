@@ -5,7 +5,7 @@ use strict;
 require Exporter;
 our ( @ISA, @EXPORT_OK, %EXPORT_TAGS );
 
-our $VERSION = 0.3;
+our $VERSION = 0.4;
 
 use IO::Select;
 use constant 1.01;
@@ -610,7 +610,10 @@ If no packet is received before the timeout period expires, undef is returned.
 Returned packets will be as a hashref of the packet data, broken out by key for
 easy access. Note, as this module is a work in progress, not every XBee packet
 type is supported. Callers should check the "api_type" key to determine the
-type of the received packet.
+type of the received packet. When possible, packed integers will be unpacked
+into the "data_as_int" key. If no packed integer is found this key will not be
+present. If unpacking is not possible (due to an unknown packet type, etc), the
+value will be undef.
 
 Accepts a single parameter, a flag indicating the received frame ID should NOT
 be freed automatically. See L<rx_frame_id> for why you might want to use this
@@ -657,7 +660,7 @@ sub rx_frame_id {
                 push @ignored, $r;
             }
         }
-        if ( time() - $start_time >= $self->{packet_timeout} ) {
+        if ( time() - $start_time >= $self->{packet_wait_time} ) {
             undef $r;
             last;
         }
@@ -842,21 +845,21 @@ sub __data_to_int {
         my ( $h, $l ) = unpack( 'NN', $data );
         return ( $l | ( $h << 32 ) );
     }
-    die 'Unsupported data type!';
+    return undef;
 }
 
 sub __parse_modem_status {
     my ( $api_data ) = @_;
-    my @u = unpack( 'C', $api_data );
+    my $u = unpack( 'C', $api_data );
     return {
-        status            => $u[1],
-        is_hardware_reset => $u[1] == 1,
-        is_wdt_reset      => $u[1] == 2,
-        is_associated     => $u[1] == 3,
-        is_disassociated  => $u[1] == 4,
-        is_sync_lost      => $u[1] == 5,
-        is_coord_realign  => $u[1] == 6,
-        is_coord_start    => $u[1] == 7,
+        status            => $u,
+        is_hardware_reset => $u == 1,
+        is_wdt_reset      => $u == 2,
+        is_associated     => $u == 3,
+        is_disassociated  => $u == 4,
+        is_sync_lost      => $u == 5,
+        is_coord_realign  => $u == 6,
+        is_coord_start    => $u == 7,
     };
 }
 
@@ -995,6 +998,13 @@ sub __parse_remote_command_response {
 }
 
 =head1 CHANGES
+
+=head2 0.4, 20110831 - jeagle
+
+Fix packet timeout bug reported by Dave S.
+
+Replace call to die() in __data_to_int with return undef, update docs to
+reflect this.
 
 =head2 0.3, 20110621 - jeagle, jdodgen
 
