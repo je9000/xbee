@@ -78,6 +78,8 @@ A basic example:
  use Device::SerialPort;
  use Device::XBee::API;
  use Data::Dumper;
+ $Data::Dumper::Useqq = 1;
+
  my $serial_port_device = Device::SerialPort->new( '/dev/ttyU0' ) || die $!;
  $serial_port_device->baudrate( 9600 );
  $serial_port_device->databits( 8 );
@@ -91,7 +93,7 @@ A basic example:
      die "Transmit failed!";
  }
  my $rx = $api->rx();
- die Dumper($rx);
+ die Dumper( $rx );
 
 =head1 SYNOPSIS
 
