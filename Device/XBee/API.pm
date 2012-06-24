@@ -76,7 +76,7 @@ A basic example:
  $serial_port_device->read_const_time( 1000 );    # 1 second per unfulfilled "read" call
 
  my $api = Device::XBee::API->new( { fh => $serial_port_device } ) || die $!;
- if ( !$api->tx( { sh => 0, sl => 0 }, 'hello world!' ) {
+ if ( !$api->tx( { sh => 0, sl => 0 }, 'hello world!' ) ) {
      die "Transmit failed!";
  }
  my $rx = $api->rx();
@@ -174,6 +174,14 @@ will help work around any issues with frame ID's "leaking", but could cause odd
 behavior in cases where all outstanding frame IDs are still in use. This option
 should be used with caution.
 
+=head3 api_mode_escape
+
+Optional. If set to a true value, the module will automatically escape outgoing
+data and un-escape incoming data for use with XBee API mode 2. Defaults to
+false.
+
+See the XBee datasheet for details on API mode 2 and escaped characters.
+
 =cut
 
 sub new {
@@ -185,6 +193,7 @@ sub new {
     $self->{packet_wait_time}    = $options->{packet_timeout} || 20;
     $self->{node_forget_time}    = $options->{node_forget_time} || 60 * 60;
     $self->{auto_reuse_frame_id} = $options->{auto_reuse_frame_id} ? 1 : 0;
+    $self->{api_mode_escape}     = $options->{api_mode_escape} ? 1 : 0;
 
     $self->{in_flight_uart_frames} = {};
     $self->{known_nodes}           = {};
@@ -193,6 +202,27 @@ sub new {
     if ( ref $self->{fh} ne 'Device::SerialPort' ) {
         $self->{fh_sel} = IO::Select->new( $self->{fh} )
          || die "Failed to initialize IO::Select!";
+    }
+
+    if ( $self->{api_mode_escape} ) {
+        $self->{api_mode_escape_table}   = {};
+        $self->{api_mode_unescape_table} = {};
+        # Note the unescape re starts with the escape character.
+        $self->{api_mode_escape_re}      = "([";
+        $self->{api_mode_unescape_re}    = "\x7D([";
+        # List of characters taken from XBee datasheet.
+        foreach my $e ( 0x7E, 0x7D, 0x11, 0x13 ) {
+            my $chr_e = chr( $e );
+            my $chr_e_20 = chr( $e ^ 0x20 );
+            $self->{api_mode_escape_table}->{ $chr_e } = $chr_e_20;
+            $self->{api_mode_unescape_table}->{ $chr_e_20 } = $chr_e;
+            $self->{api_mode_escape_re}   .= quotemeta( $chr_e );
+            $self->{api_mode_unescape_re} .= quotemeta( $chr_e_20 );
+        }
+
+        # Note the trailing "])" to terminate the character class.
+        $self->{api_mode_escape_re}   = qr/$self->{api_mode_escape_re}])/;
+        $self->{api_mode_unescape_re} = qr/$self->{api_mode_unescape_re}])/;
     }
 
     bless $self, $class;
@@ -257,6 +287,15 @@ sub read_packet {
         return undef;
     }
     $packet_data_length--;
+
+    if ( $self->{api_mode_escape} ) {
+        # Since the unescape re starts with \x7D, it's okay to start matching
+        # at the begining of the received data. Even though the first byte is
+        # never escaped, we won't match it because we look for \x7D preceeding
+        # the escaped value, which we won't find before the first \x7E byte.
+        $d =~ s/$self->{api_mode_unescape_re}/$self->{api_mode_unescape_table}->{$1}/g;
+    }
+
     my ( $packet_api_id, $packet_data, $packet_checksum ) = unpack( "Ca[$packet_data_length]C", $d );
     my $validate_checksum = $packet_api_id + $packet_checksum;
     for ( my $i = 0; $i < $packet_data_length; $i++ ) {
@@ -348,18 +387,24 @@ sub parse_packet {
 
 sub send_packet {
     my ( $self, $api_id, $data ) = @_;
-    my $xbee_data = "\x7E" . pack( 'nC', length( $data ) + 1, $api_id );
+    my $xbee_data = pack( 'nC', length( $data ) + 1, $api_id );
     my $checksum = $api_id;
 
     for ( my $i = 0; $i < length( $data ); $i++ ) {
         $checksum += unpack( 'C', substr( $data, $i, 1 ) );
     }
     $checksum = pack( 'C', 0xFF - ( $checksum & 0xFF ) );
+    $xbee_data = $xbee_data . $data . $checksum;
+
+    if ( $self->{api_mode_escape} ) {
+        # Note we insert the \x7D here, it's not part of the table!
+        $xbee_data =~ s/$self->{api_mode_escape_re}/\x7D$self->{api_mode_escape_table}->{$1}/g;
+    }
 
     if ( !$self->{fh_sel} ) {
-        $self->{fh}->write( $xbee_data . $data . $checksum );
+        $self->{fh}->write( "\x7E" . $xbee_data );
     } else {
-        syswrite( $self->{fh}, $xbee_data . $data . $checksum );
+        syswrite( $self->{fh}, "\x7E" . $xbee_data );
     }
 }
 
@@ -631,17 +676,18 @@ sub rx {
 
 =head2 rx_frame_id
 
-Like L<rx> but only returns the packet with the requested frame ID number If no
-packet with the specified frame ID is received within the object's configured
-packet_timeout time, undef will be returned. Any other packets received will be
-enqueued for later processing by another rx function.
+Like L<rx> but only returns the packet with the requested frame ID number and
+then frees that frame ID. If no packet with the specified frame ID is received
+within the object's configured packet_timeout time, undef will be returned. Any
+other packets received will be enqueued for later processing by another rx
+function call.
 
 Accepts two parameters, the first being the desired frame ID and the second a
-flag denoting  this frame ID should NOT be automatically freed after it is
-received. In cases where multiple frames with the same ID are expected to be
-returned (such as after an AT ND command), it is preferable to set this flag to
-a true value and continue to call rx_frame_id until undef is returned, and then
-free the ID via L<free_frame_id>.
+flag denoting that the frame ID should NOT be automatically freed. In cases
+where multiple frames with the same ID are expected to be returned (such as
+after an AT ND command), it is preferable to set this flag to a true value and
+continue to call rx_frame_id until undef is returned, and then free the ID via
+L<free_frame_id>.
 
 =cut
 
@@ -835,7 +881,7 @@ sub __parse_at_command_response {
 sub __data_to_int {
     my ( $data ) = @_;
 
-    if ( length($data) == 1 ) {
+    if ( length( $data ) == 1 ) {
         return unpack( 'C', $data );
     } elsif ( length( $data ) == 2 ) {
         return unpack( 'n', $data );
@@ -997,7 +1043,70 @@ sub __parse_remote_command_response {
     };
 }
 
+=head1 EXAMPLES
+
+Miscellaneous code examples follow.
+
+=head2 Fetch modem baud rage
+
+ use Device::SerialPort;
+ use Device::XBee::API;
+ 
+ # From XBee datasheet pg 73.
+ my @baud_rate_table = (
+     1200,
+     2400,
+     4800,
+     9600,
+     19200,
+     38400,
+     57600,
+     115200
+ );
+ 
+ # Configure the serial port
+ my $serial_port_device = Device::SerialPort->new( '/dev/ttyU0' )
+     || die $!;
+ $serial_port_device->baudrate( 9600 );
+ $serial_port_device->databits( 8 );
+ $serial_port_device->stopbits( 1 );
+ $serial_port_device->parity( 'none' );
+ $serial_port_device->read_char_time( 0 );
+ $serial_port_device->read_const_time( 1000 );
+ 
+ # Create the API object
+ my $api = Device::XBee::API->new( { fh => $serial_port_device } )
+     || die $!;
+ 
+ # Send the BD API command
+ my $at_frame_id = $api->at( 'BD' );
+ die "Transmit failed" unless $at_frame_id;
+ 
+ # Receive the reply
+ my $rx = $api->rx_frame_id( $at_frame_id );
+ die "No reply received" if !$rx;
+ if ( $rx->{status} != 0 ) {
+     die "API error" if $rx->{is_error};
+     die "Invalid command" if $rx->{is_invalid_command};
+     die "Invalid parameter" if $rx->{is_invalid_parameter};
+     die "Unknown error";
+ }
+ 
+ my $baud_rate = $baud_rate_table[ $rx->{data_as_int} ];
+ if ( !$baud_rate ) {
+     $baud_rate = $rx->{data_as_int};
+ }
+ 
+ print "Modem baud rate is $baud_rate bps.\n";
+
+
 =head1 CHANGES
+
+=head2 0.5, 20120623 - jeagle
+
+Update documentation.
+
+Add support for API mode 2 escapes. Needs testing!
 
 =head2 0.4, 20110831 - jeagle
 
