@@ -5,7 +5,7 @@ use strict;
 require Exporter;
 our ( @ISA, @EXPORT_OK, %EXPORT_TAGS );
 
-our $VERSION = 0.4;
+our $VERSION = 0.6;
 
 use IO::Select;
 use constant 1.01;
@@ -199,29 +199,31 @@ sub new {
     $self->{known_nodes}           = {};
     $self->{rx_queue}              = [];
 
-    if ( ref $self->{fh} ne 'Device::SerialPort' ) {
+    if (   ( ref $self->{fh} ne 'Device::SerialPort' )
+        && ( ref $self->{fh} ne 'Win32::SerialPort' ) )
+    {
         $self->{fh_sel} = IO::Select->new( $self->{fh} )
          || die "Failed to initialize IO::Select!";
     }
 
     if ( $self->{api_mode_escape} ) {
-        $self->{api_mode_escape_table}   = {};
+        $self->{api_mode_escape_table} = {};
         $self->{api_mode_unescape_table} = {};
         # Note the unescape re starts with the escape character.
-        $self->{api_mode_escape_re}      = "([";
-        $self->{api_mode_unescape_re}    = "\x7D([";
+        $self->{api_mode_escape_re} = "([";
+        $self->{api_mode_unescape_re} = "\x7D([";
         # List of characters taken from XBee datasheet.
         foreach my $e ( 0x7E, 0x7D, 0x11, 0x13 ) {
             my $chr_e = chr( $e );
             my $chr_e_20 = chr( $e ^ 0x20 );
             $self->{api_mode_escape_table}->{ $chr_e } = $chr_e_20;
             $self->{api_mode_unescape_table}->{ $chr_e_20 } = $chr_e;
-            $self->{api_mode_escape_re}   .= quotemeta( $chr_e );
+            $self->{api_mode_escape_re} .= quotemeta( $chr_e );
             $self->{api_mode_unescape_re} .= quotemeta( $chr_e_20 );
         }
 
         # Note the trailing "])" to terminate the character class.
-        $self->{api_mode_escape_re}   = qr/$self->{api_mode_escape_re}])/;
+        $self->{api_mode_escape_re} = qr/$self->{api_mode_escape_re}])/;
         $self->{api_mode_unescape_re} = qr/$self->{api_mode_unescape_re}])/;
     }
 
@@ -356,6 +358,9 @@ sub parse_packet {
 
     } elsif ( $api_id == XBEE_API_TYPE__ZIGBEE_RECEIVE_PACKET ) {
         $r = __parse_zigbee_receive_packet( $api_data );
+
+    } elsif ( $api_id == XBEE_API_TYPE__ZIGBEE_EXPLICIT_RX_INDICATOR ) {
+        $r = __parse_zigbee_explicit_rx_indicator( $api_data );
 
     } elsif ( $api_id == XBEE_API_TYPE__ZIGBEE_TRANSMIT_STATUS ) {
         $r = __parse_zigbee_transmit_status( $api_data );
@@ -605,12 +610,12 @@ sub tx {
     my $frame_id = $self->alloc_frame_id();
     my $tx_req = pack( 'CNNnCC', $frame_id, $tx->{sh}, $tx->{sl}, $tx->{na}, 0, ( $tx->{broadcast} ? 0x8 : 0 ) );
     $self->send_packet( XBEE_API_TYPE__ZIGBEE_TRANSMIT_REQUEST, $tx_req . $data );
-    my $rx;
+
+    if ( $async ) { return $frame_id; }
 
     # Wait until we get the send result message.
-    $rx = $self->rx_frame_id( $frame_id );
+    my $rx = $self->rx_frame_id( $frame_id );
     return undef unless defined $rx;
-    if ( $async ) { return $rx; }
 
     # Wonky return API.
     if ( wantarray ) {
@@ -758,7 +763,7 @@ Note, the age-out mechanism may be susceptable to stepping of the system clock.
 sub known_nodes {
     my ( $self ) = @_;
     $self->_prune_known_nodes();
-    return { %{$self->{known_nodes}} };
+    return { %{ $self->{known_nodes} } };
 }
 
 ### Private methods
@@ -778,9 +783,9 @@ sub _add_known_node {
         # These are the only known values that should change for a node with a
         # given serial number. The rest are burned into the chip.
         foreach my $k ( qw/ ni profile_id / ) {
-            if ( $node->{$k} &&
-                ( !$sknsn->{$k} || $sknsn->{$k} ne $node->{$k} )
-            ) {
+            if ( $node->{$k}
+                && ( !$sknsn->{$k} || $sknsn->{$k} ne $node->{$k} ) )
+            {
                 $sknsn->{$k} = $node->{$k};
             }
         }
@@ -886,8 +891,8 @@ sub __data_to_int {
     } elsif ( length( $data ) == 2 ) {
         return unpack( 'n', $data );
     } elsif ( length( $data ) == 4 ) {
-        return unpack( 'N', $data);
-    } elsif ( length( $data ) == 8 ) {                   
+        return unpack( 'N', $data );
+    } elsif ( length( $data ) == 8 ) {
         my ( $h, $l ) = unpack( 'NN', $data );
         return ( $l | ( $h << 32 ) );
     }
@@ -896,16 +901,16 @@ sub __data_to_int {
 
 sub __parse_modem_status {
     my ( $api_data ) = @_;
-    my $u = unpack( 'C', $api_data );
+    my @u = unpack( 'C', $api_data );
     return {
-        status            => $u,
-        is_hardware_reset => $u == 1,
-        is_wdt_reset      => $u == 2,
-        is_associated     => $u == 3,
-        is_disassociated  => $u == 4,
-        is_sync_lost      => $u == 5,
-        is_coord_realign  => $u == 6,
-        is_coord_start    => $u == 7,
+        status            => $u[1],
+        is_hardware_reset => $u[1] == 1,
+        is_wdt_reset      => $u[1] == 2,
+        is_associated     => $u[1] == 3,
+        is_disassociated  => $u[1] == 4,
+        is_sync_lost      => $u[1] == 5,
+        is_coord_realign  => $u[1] == 6,
+        is_coord_start    => $u[1] == 7,
     };
 }
 
@@ -922,6 +927,27 @@ sub __parse_zigbee_receive_packet {
         data         => $u[4],
         is_ack       => $u[3] & 0x01,
         is_broadcast => ( $u[3] & 0x02 ? 1 : 0 ),
+    };
+}
+
+sub __parse_zigbee_explicit_rx_indicator {
+    my ( $api_data ) = @_;
+    my @u = unpack( 'NNnCCnnCa*', $api_data );
+
+    return {
+        sh                 => $u[0],
+        sl                 => $u[1],
+        na                 => $u[2],
+        se                 => $u[3],
+        de                 => $u[4],
+        ci                 => $u[5],
+        profile_id         => $u[6],
+        options            => $u[7],
+        data               => $u[8],
+        is_ack             => $u[7] & 0x01,
+        is_broadcast       => ( $u[7] & 0x02 ? 1 : 0 ),
+        is_encrypted       => ( $u[7] & 0x20 ? 1 : 0 ),
+        is_from_end_device => ( $u[7] & 0x40 ? 1 : 0 ),
     };
 }
 
@@ -1005,21 +1031,21 @@ sub __parse_node_identification_indicator {
     my ( $api_data ) = @_;
     my @u = unpack( 'NNnCnNNZ*nCCnn', $api_data );
     return {
-        source_sh       => $u[0],
-        source_sl       => $u[1],
-        source_na       => $u[2],
-        options         => $u[3],
-        is_ack          => $u[3] & 0x01,
-        is_broadcast    => ( $u[3] & 0x02 ? 1 : 0 ),
-        remote_na       => $u[4],
-        remote_sh       => $u[5],
-        remote_sl       => $u[6],
-        ni              => $u[7],
-        parent_address  => $u[8],
-        device_type     => $u[9],
-        source_event    => $u[10],
-        profile_id      => $u[11],
-        mfg_id          => $u[12]
+        source_sh      => $u[0],
+        source_sl      => $u[1],
+        source_na      => $u[2],
+        options        => $u[3],
+        is_ack         => $u[3] & 0x01,
+        is_broadcast   => ( $u[3] & 0x02 ? 1 : 0 ),
+        remote_na      => $u[4],
+        remote_sh      => $u[5],
+        remote_sl      => $u[6],
+        ni             => $u[7],
+        parent_address => $u[8],
+        device_type    => $u[9],
+        source_event   => $u[10],
+        profile_id     => $u[11],
+        mfg_id         => $u[12]
     };
 }
 
@@ -1102,11 +1128,19 @@ Miscellaneous code examples follow.
 
 =head1 CHANGES
 
-=head2 0.5, 20120623 - jeagle
+=head2 0.6, 20120624 - jeagle
 
 Update documentation.
 
-Add support for API mode 2 escapes. Needs testing!
+Add support for API mode 2 escapes. Needs testing.
+
+=head2 0.5, 20120401 - jeagle
+
+Add support for Win32::SerialPort to enable Windows support. (Thanks Jerry)
+
+Fix issue with tx() in async mode. (Thanks Vicente)
+
+Add support for "explicit rx indicator" packets. (Thanks Vicente)
 
 =head2 0.4, 20110831 - jeagle
 
