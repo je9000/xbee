@@ -41,6 +41,17 @@ use constant XBEE_API_TYPE_TO_STRING => {
     0x95 => 'NODE_IDENTIFICATION_INDICATOR',
 };
 
+use constant XBEE_API_BAUD_RATE_TABLE => [
+    1200,
+    2400,
+    4800,
+    9600,
+    19200,
+    38400,
+    57600,
+    115200,
+];
+
 use constant XBEE_API_BROADCAST_ADDR_H          => 0x00;
 use constant XBEE_API_BROADCAST_ADDR_L          => 0xFFFF;
 use constant XBEE_API_BROADCAST_NA_UNKNOWN_ADDR => 0xFFFE;
@@ -121,10 +132,13 @@ See the XBee datasheet for details. The following constants are available:
  XBEE_API_BROADCAST_NA_UNKNOWN_ADDR
  
  XBEE_API_TYPE_TO_STRING
+ XBEE_API_BAUD_RATE_TABLE
 
 The above should be self explanatory (with the help of the datasheet). The
 constant "XBEE_API_TYPE_TO_STRING" is a hashref keyed by the numeric id of the
-packet type with the value being the constant name, to aid in debugging.
+packet type with the value being the constant name, to aid in debugging. The
+constant XBEE_API_BAUD_RATE_TABLE is the baud rate table used by the BD API
+command.
 
 =head1 METHODS
 
@@ -1133,6 +1147,8 @@ Miscellaneous code examples follow.
 Update documentation.
 
 Add support for API mode 2 escapes. Needs testing.
+
+Add constant for the "BD" baud rate table.
 
 =head2 0.5, 20120401 - jeagle
 
