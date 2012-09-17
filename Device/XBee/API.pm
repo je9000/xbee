@@ -257,6 +257,9 @@ sub read_bytes {
     if ( !$self->{fh_sel} ) {
         while ( $timeout > 0 ) {
             my ( $count, $saw ) = $self->{fh}->read( $to_read );    # will read _up to_ 255 chars
+            if ( !defined $count ) {
+                die "Error reading from device: $!";
+            }
             if ( $count > 0 ) {
                 $chars += $count;
                 $buffer .= $saw;
@@ -917,16 +920,16 @@ sub __data_to_int {
 
 sub __parse_modem_status {
     my ( $api_data ) = @_;
-    my @u = unpack( 'C', $api_data );
+    my $u = unpack( 'C', $api_data );
     return {
-        status            => $u[1],
-        is_hardware_reset => $u[1] == 1,
-        is_wdt_reset      => $u[1] == 2,
-        is_associated     => $u[1] == 3,
-        is_disassociated  => $u[1] == 4,
-        is_sync_lost      => $u[1] == 5,
-        is_coord_realign  => $u[1] == 6,
-        is_coord_start    => $u[1] == 7,
+        status            => $u,
+        is_hardware_reset => $u == 1,
+        is_wdt_reset      => $u == 2,
+        is_associated     => $u == 3,
+        is_disassociated  => $u == 4,
+        is_sync_lost      => $u == 5,
+        is_coord_realign  => $u == 6,
+        is_coord_start    => $u == 7,
     };
 }
 
