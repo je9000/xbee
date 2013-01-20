@@ -5,31 +5,48 @@ use Device::XBee::API qw/:xbee_flags/;
 use base qw/Device::XBee::API/;
 
 use constant XBEE_POWER_VERSION => 1;
-use constant XBEE_POWER_PACKET_TYPE_PING =>         0;
-use constant XBEE_POWER_PACKET_TYPE_HELLO =>        1;
-use constant XBEE_POWER_PACKET_TYPE_SENSOR_QUERY => 2;
+use constant XBEE_POWER_PACKET_TYPE_PING =>          0;
+use constant XBEE_POWER_PACKET_TYPE_HELLO =>         1;
+use constant XBEE_POWER_PACKET_TYPE_SENSOR_QUERY =>  2;
 use constant XBEE_POWER_PACKET_TYPE_SWITCH_ACTION => 3;
-use constant XBEE_POWER_PACKET_TYPE_QUERY =>        4;
-use constant XBEE_POWER_PACKET_TYPE_ERROR =>        5;
-use constant XBEE_POWER_PACKET_TYPE_PONG =>         6;
-use constant XBEE_POWER_PACKET_TYPE_SENSOR_DATA =>  7;
-use constant XBEE_POWER_PACKET_TYPE_SWITCH_DATA =>  8;
+use constant XBEE_POWER_PACKET_TYPE_QUERY =>         4;
+use constant XBEE_POWER_PACKET_TYPE_ERROR =>         5;
+use constant XBEE_POWER_PACKET_TYPE_PONG =>          6;
+use constant XBEE_POWER_PACKET_TYPE_SENSOR_DATA =>   7;
+use constant XBEE_POWER_PACKET_TYPE_SWITCH_DATA =>   8;
 
 use constant XBEE_POWER_PACKET_ID_ACK_BIT_MASK => 0x80;
 use constant XBEE_POWER_PACKET_ID_NO_ACK => 0;
 use constant XBEE_POWER_PACKET_ID_MAX => 127;
 
-use constant XBEE_POWER_SWITCH_ACTION_READ =>  0x52; # 'R'
-use constant XBEE_POWER_SWITCH_ACTION_ON   =>  1;
-use constant XBEE_POWER_SWITCH_ACTION_OFF  =>  0;
+use constant XBEE_POWER_SWITCH_ACTION_READ => 0x52; # 'R'
+use constant XBEE_POWER_SWITCH_ACTION_ON   => 1;
+use constant XBEE_POWER_SWITCH_ACTION_OFF  => 0;
+
+use constant DEFAULT_RETRY_COUNT  => 5;
 
 sub new {
     my ( $class, $options ) = @_;
 
-    my $self = $class->SUPER::new( $options );
-    if ( $options->{async} ) {
-        $self->{async} = 1;
+    my %myopts;
+
+    if ( exists $options->{async} ) {
+        $myopts{async} = 1;
         delete $options->{async};
+    }
+
+    if ( exists $options->{retry_count} ) {
+        $myopts{retry_count} = 1;
+        delete $options->{retry_count};
+    }
+
+    my $self = $class->SUPER::new( $options );
+    foreach my $k ( keys( %myopts ) ) {
+        $self->{$k} = $myopts{$k};
+    }
+
+    if ( !$self->{retry_count} ) {
+        $self->{retry_count} = DEFAULT_RETRY_COUNT;
     }
 
     $self->{in_flight_power_ids} = {};
@@ -156,9 +173,11 @@ sub query {
     my ( $self, $endpoint ) = @_;
     my $rx;
     my $id = $self->alloc_power_id();
+    my $i = 0;
 
     RETRY_TRANSMIT:
     do {
+        if ( $i++ > $self->{retry_count} ) { return undef; };
         $rx = $self->tx( $endpoint, pack( 'CCC', XBEE_POWER_VERSION, XBEE_POWER_PACKET_TYPE_QUERY, $id ) );
         if ( $self->{async} ) {
             return $id if $rx;
@@ -175,9 +194,11 @@ sub ping {
     my ( $self, $endpoint ) = @_;
     my $rx;
     my $id = $self->alloc_power_id();
+    my $i = 0;
 
     RETRY_TRANSMIT:
     do {
+        if ( $i++ > $self->{retry_count} ) { return undef; };
         $rx = $self->tx( $endpoint, pack( 'CCC', XBEE_POWER_VERSION, XBEE_POWER_PACKET_TYPE_PING, $id ) );
         if ( $self->{async} ) {
             return $id if $rx;
@@ -195,9 +216,11 @@ sub switch_set {
     my $rx;
     my $id = $self->alloc_power_id();
     my @rx_queue;
+    my $i = 0;
 
     RETRY_TRANSMIT:
     do {
+        if ( $i++ > $self->{retry_count} ) { return undef; };
         $rx = $self->tx( $endpoint, pack( 'CCCCC', XBEE_POWER_VERSION, XBEE_POWER_PACKET_TYPE_SWITCH_ACTION, $id, $switch, $newval ) );
         if ( $self->{async} ) {
             return $id if $rx;
@@ -221,9 +244,11 @@ sub sensor_get {
     my $rx;
     my $id = $self->alloc_power_id();
     my @rx_queue;
+    my $i = 0;
 
     RETRY_TRANSMIT:
     do {
+        if ( $i++ > $self->{retry_count} ) { return undef; };
         $rx = $self->tx( $endpoint, pack( 'CCCC', XBEE_POWER_VERSION, XBEE_POWER_PACKET_TYPE_SENSOR_QUERY, $id, $sensor ) );
         if ( $self->{async} ) {
             return $id if $rx;
