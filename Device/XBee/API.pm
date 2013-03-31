@@ -41,16 +41,7 @@ use constant XBEE_API_TYPE_TO_STRING => {
     0x95 => 'NODE_IDENTIFICATION_INDICATOR',
 };
 
-use constant XBEE_API_BAUD_RATE_TABLE => [
-    1200,
-    2400,
-    4800,
-    9600,
-    19200,
-    38400,
-    57600,
-    115200,
-];
+use constant XBEE_API_BAUD_RATE_TABLE => [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200];
 
 use constant XBEE_API_BROADCAST_ADDR_H          => 0x00;
 use constant XBEE_API_BROADCAST_ADDR_L          => 0xFFFF;
@@ -228,7 +219,7 @@ sub new {
 
     if ( $options->{alloc_frame_id_func} && $options->{free_frame_id_func} ) {
         $self->{alloc_frame_id_func} = $options->{alloc_frame_id_func};
-        $self->{free_frame_id_func} = $options->{free_frame_id_func};
+        $self->{free_frame_id_func}  = $options->{free_frame_id_func};
     }
 
     $self->{in_flight_uart_frames} = {};
@@ -243,23 +234,23 @@ sub new {
     }
 
     if ( $self->{api_mode_escape} ) {
-        $self->{api_mode_escape_table} = {};
+        $self->{api_mode_escape_table}   = {};
         $self->{api_mode_unescape_table} = {};
         # Note the unescape re starts with the escape character.
-        $self->{api_mode_escape_re} = "([";
+        $self->{api_mode_escape_re}   = "([";
         $self->{api_mode_unescape_re} = "\x7D([";
         # List of characters taken from XBee datasheet.
         foreach my $e ( 0x7E, 0x7D, 0x11, 0x13 ) {
-            my $chr_e = chr( $e );
+            my $chr_e    = chr( $e );
             my $chr_e_20 = chr( $e ^ 0x20 );
-            $self->{api_mode_escape_table}->{ $chr_e } = $chr_e_20;
-            $self->{api_mode_unescape_table}->{ $chr_e_20 } = $chr_e;
-            $self->{api_mode_escape_re} .= quotemeta( $chr_e );
+            $self->{api_mode_escape_table}->{$chr_e}      = $chr_e_20;
+            $self->{api_mode_unescape_table}->{$chr_e_20} = $chr_e;
+            $self->{api_mode_escape_re}   .= quotemeta( $chr_e );
             $self->{api_mode_unescape_re} .= quotemeta( $chr_e_20 );
         }
 
         # Note the trailing "])" to terminate the character class.
-        $self->{api_mode_escape_re} = qr/$self->{api_mode_escape_re}])/;
+        $self->{api_mode_escape_re}   = qr/$self->{api_mode_escape_re}])/;
         $self->{api_mode_unescape_re} = qr/$self->{api_mode_unescape_re}])/;
     }
 
@@ -313,29 +304,27 @@ sub read_bytes {
 sub read_packet {
     my ( $self ) = @_;
     my $d;
+    my $packet_data_length;
 
     do {
         $d = $self->read_bytes( 1 );
         return undef if !defined $d;
     } while ( $d ne "\x7E" );
 
-    $d = $self->read_bytes( 2 );
-    my ( $packet_data_length ) = unpack( 'n', $d );
-
-    $d = $self->read_bytes( $packet_data_length + 1 );
-    if ( !$d ) {
-        #warn "Read a partial packet!";
-        return undef;
-    }
-    $packet_data_length--;
-
     if ( $self->{api_mode_escape} ) {
-        # Since the unescape re starts with \x7D, it's okay to start matching
-        # at the begining of the received data. Even though the first byte is
-        # never escaped, we won't match it because we look for \x7D preceeding
-        # the escaped value, which we won't find before the first \x7E byte.
-        $d =~ s/$self->{api_mode_unescape_re}/$self->{api_mode_unescape_table}->{$1}/g;
+        ( $packet_data_length, $d ) = $self->read_escaped_packet();
+    } else {
+        $d = $self->read_bytes( 2 );
+
+        ( $packet_data_length ) = unpack( 'n', $d );
+
+        $d = $self->read_bytes( $packet_data_length + 1 );
+        if ( !$d ) {
+            return undef;
+        }
     }
+
+    $packet_data_length--;
 
     my ( $packet_api_id, $packet_data, $packet_checksum ) = unpack( "Ca[$packet_data_length]C", $d );
     my $validate_checksum = $packet_api_id + $packet_checksum;
@@ -351,18 +340,66 @@ sub read_packet {
     return ( $packet_api_id, $packet_data );
 }
 
+sub read_escaped_packet {
+    my ( $self ) = @_;
+
+    my $l1 = $self->read_bytes( 1 );
+    return unless defined $l1;
+
+    if ( $l1 eq "\x7D" ) {
+        $l1 = $self->read_bytes( 1 );
+        return unless defined $l1;
+        $l1 ^= "\x20";
+    }
+
+    my $l2 = $self->read_bytes( 1 );
+    return unless defined $l2;
+
+    if ( $l2 eq "\x7D" ) {
+        $l2 = $self->read_bytes( 1 );
+        return unless defined $l2;
+        $l2 ^= "\x20";
+    }
+
+    my $packet_data_length = unpack( 'n', $l1 . $l2 );
+    my $data = $self->read_bytes( $packet_data_length + 1 );
+    return unless defined $data;    # includes checksum
+
+    if ( $data =~ /\x7D$/ ) {       # trailing escape
+        my $tail = $self->read_bytes( 1 );
+        return unless defined $tail;
+        $data .= $tail;
+    }
+
+    $data =~ s/$self->{api_mode_unescape_re}/$self->{api_mode_unescape_table}->{$1}/g;
+    my $need_a_few_more = $packet_data_length - length( $data ) + 1;
+
+    while ( $need_a_few_more-- ) {
+        my $b = $self->read_bytes( 1 );
+        return unless defined $b;
+        if ( $b eq "\x7D" ) {
+            $b = $self->read_bytes( 1 );
+            return unless defined $b;
+            $b ^= "\x20";
+        }
+        $data .= $b;
+    }
+
+    return ( $packet_data_length, $data );
+}
+
 sub free_frame_id {
     my ( $self, $id ) = @_;
-    if ( $self->{free_frame_id_func} ) { return $self->{free_frame_id_func}->($self, $id); }
+    if ( $self->{free_frame_id_func} ) { return $self->{free_frame_id_func}->( $self, $id ); }
     delete $self->{in_flight_uart_frames}->{$id};
 }
 
 # id 0 is special, don't allocate it. I don't know if we should die here or
 # return 0 on failure...
 sub alloc_frame_id {
-    my ( $self )    = @_;
+    my ( $self ) = @_;
 
-    if ( $self->{alloc_frame_id_func} ) { return $self->{alloc_frame_id_func}->($self); }
+    if ( $self->{alloc_frame_id_func} ) { return $self->{alloc_frame_id_func}->( $self ); }
 
     my $start_id    = int( rand( 255 ) ) + 1;
     my $id          = $start_id;
@@ -1171,6 +1208,12 @@ Miscellaneous code examples follow.
 
 
 =head1 CHANGES
+
+=head2 0.7, 20130330 - jeagle
+
+Add ability to allow users to specify their own frame allocation routines.
+
+Update API mode 2 with latest version from jdodgen
 
 =head2 0.6, 20120624 - jeagle
 

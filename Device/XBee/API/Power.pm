@@ -36,7 +36,7 @@ sub new {
     }
 
     if ( exists $options->{retry_count} ) {
-        $myopts{retry_count} = 1;
+        $myopts{retry_count} = $options->{retry_count};
         delete $options->{retry_count};
     }
 
@@ -68,12 +68,17 @@ sub free_power_id {
     delete $self->{in_flight_power_ids}->{$id};
 }
 
+# Sometimes remote nodes will reply multiple times to a query. I assume it's
+# because they don't get the ACK so they know their reply made it. We could
+# detect this based on previously issued power IDs but we don't now. The risk
+# is if the same ID gets re-used, a re-ACK to a previous message might be
+# mistakenly associated with a newer message.
 sub alloc_power_id {
     my ( $self ) = @_;
     my $id;
     do {
         # We use the MSB to indicate an "ack", so we can only use the bottom 7
-        # bits for an power id. 0 is also reserved for special use, so we
+        # bits for the power id. 0 is also reserved for special use, so we
         # generate a number between 1 and 127.
         $id = int( rand( 127 ) ) + 1;
     } while ( $self->{in_flight_power_ids}->{$id} );
@@ -82,10 +87,14 @@ sub alloc_power_id {
     return $id;
 }
 
+sub tx {
+    my $self = shift;
+    return $self->SUPER::tx(@_);
+}
+
 sub rx {
     my ( $self, $rx ) = @_;
     my @u;
-    my $p;
     my $power_data;
 
     $rx = $self->SUPER::rx( $rx );
@@ -103,7 +112,7 @@ sub rx {
     $rx->{power} = { version => $u[0] };
     if ( $rx->{power}->{version} != XBEE_POWER_VERSION ) { return $rx; }
 
-    $p = $rx->{power}; # Easier to type.
+    my $p = $rx->{power}; # Easier to type.
 
     @u = unpack( 'CCCa*', $rx->{data} );
     $p->{type} = $u[1];
@@ -178,7 +187,7 @@ sub query {
     RETRY_TRANSMIT:
     do {
         if ( $i++ > $self->{retry_count} ) { return undef; };
-        $rx = $self->tx( $endpoint, pack( 'CCC', XBEE_POWER_VERSION, XBEE_POWER_PACKET_TYPE_QUERY, $id ) );
+        $rx = $self->tx( $endpoint, pack( 'CCC', XBEE_POWER_VERSION, XBEE_POWER_PACKET_TYPE_QUERY, $id ), $self->{async} );
         if ( $self->{async} ) {
             return $id if $rx;
             return undef;
@@ -199,7 +208,7 @@ sub ping {
     RETRY_TRANSMIT:
     do {
         if ( $i++ > $self->{retry_count} ) { return undef; };
-        $rx = $self->tx( $endpoint, pack( 'CCC', XBEE_POWER_VERSION, XBEE_POWER_PACKET_TYPE_PING, $id ) );
+        $rx = $self->tx( $endpoint, pack( 'CCC', XBEE_POWER_VERSION, XBEE_POWER_PACKET_TYPE_PING, $id ), $self->{async} );
         if ( $self->{async} ) {
             return $id if $rx;
             return undef;
@@ -221,7 +230,7 @@ sub switch_set {
     RETRY_TRANSMIT:
     do {
         if ( $i++ > $self->{retry_count} ) { return undef; };
-        $rx = $self->tx( $endpoint, pack( 'CCCCC', XBEE_POWER_VERSION, XBEE_POWER_PACKET_TYPE_SWITCH_ACTION, $id, $switch, $newval ) );
+        $rx = $self->tx( $endpoint, pack( 'CCCCC', XBEE_POWER_VERSION, XBEE_POWER_PACKET_TYPE_SWITCH_ACTION, $id, $switch, $newval ), $self->{async} );
         if ( $self->{async} ) {
             return $id if $rx;
             return undef;
@@ -249,7 +258,7 @@ sub sensor_get {
     RETRY_TRANSMIT:
     do {
         if ( $i++ > $self->{retry_count} ) { return undef; };
-        $rx = $self->tx( $endpoint, pack( 'CCCC', XBEE_POWER_VERSION, XBEE_POWER_PACKET_TYPE_SENSOR_QUERY, $id, $sensor ) );
+        $rx = $self->tx( $endpoint, pack( 'CCCC', XBEE_POWER_VERSION, XBEE_POWER_PACKET_TYPE_SENSOR_QUERY, $id, $sensor ), $self->{async} );
         if ( $self->{async} ) {
             return $id if $rx;
             return undef;
