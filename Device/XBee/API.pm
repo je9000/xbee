@@ -5,7 +5,7 @@ use strict;
 require Exporter;
 our ( @ISA, @EXPORT_OK, %EXPORT_TAGS );
 
-our $VERSION = 0.6;
+our $VERSION = 0.7;
 
 use IO::Select;
 use constant 1.01;
@@ -190,6 +190,21 @@ will help work around any issues with frame ID's "leaking", but could cause odd
 behavior in cases where all outstanding frame IDs are still in use. This option
 should be used with caution.
 
+=head3 alloc_frame_id_func
+=head3 free_frame_id_func
+
+Optional code references to functions used to allocate and free frame IDs. If
+both are specified they will be called in place of the internal frame ID
+tracking functions allowing the user more control over how frame IDs are
+generated. The alloc_frame_id_func will be called when a new frame ID is needed
+and will be passed as a parameter the reference to the Device:XBee::API object
+and must return an integer between 1 and 255 inclusive. The free_frame_id_func
+will be called when the reply frame is received and the frame ID is no longer
+needed and will be passed as parameters a reference to the Device::XBee::API
+obect and the frame ID to be freed.
+
+See L<auto_reuse_frame_id> for details on how this module uses frame IDs.
+
 =head3 api_mode_escape
 
 Optional. If set to a true value, the module will automatically escape outgoing
@@ -210,6 +225,11 @@ sub new {
     $self->{node_forget_time}    = $options->{node_forget_time} || 60 * 60;
     $self->{auto_reuse_frame_id} = $options->{auto_reuse_frame_id} ? 1 : 0;
     $self->{api_mode_escape}     = $options->{api_mode_escape} ? 1 : 0;
+
+    if ( $options->{alloc_frame_id_func} && $options->{free_frame_id_func} ) {
+        $self->{alloc_frame_id_func} = $options->{alloc_frame_id_func};
+        $self->{free_frame_id_func} = $options->{free_frame_id_func};
+    }
 
     $self->{in_flight_uart_frames} = {};
     $self->{known_nodes}           = {};
@@ -333,6 +353,7 @@ sub read_packet {
 
 sub free_frame_id {
     my ( $self, $id ) = @_;
+    if ( $self->{free_frame_id_func} ) { return $self->{free_frame_id_func}->($self, $id); }
     delete $self->{in_flight_uart_frames}->{$id};
 }
 
@@ -340,10 +361,14 @@ sub free_frame_id {
 # return 0 on failure...
 sub alloc_frame_id {
     my ( $self )    = @_;
+
+    if ( $self->{alloc_frame_id_func} ) { return $self->{alloc_frame_id_func}->($self); }
+
     my $start_id    = int( rand( 255 ) ) + 1;
     my $id          = $start_id;
     my $oldest_time = 0xFFFFFFFF;
     my $oldest_id;
+
     while ( 1 ) {
         if ( !exists $self->{in_flight_uart_frames}->{$id} ) {
             $self->{in_flight_uart_frames}->{$id} = time();
