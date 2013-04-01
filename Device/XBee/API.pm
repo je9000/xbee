@@ -41,6 +41,18 @@ use constant XBEE_API_TYPE_TO_STRING => {
     0x95 => 'NODE_IDENTIFICATION_INDICATOR',
 };
 
+use constant XBEE_API_TRANSMIT_STATUS_TO_STRING => {
+    0x00 => 'Success',
+    0x02 => 'CCA Failure',
+    0x15 => 'Invalid destination endpoint',
+    0x21 => 'Network ACK Failure',
+    0x22 => 'Not Joined to Network',
+    0x23 => 'Self-addressed',
+    0x24 => 'Address Not Found',
+    0x25 => 'Route Not Found',
+    0x74 => 'Data payload too large',
+};
+
 use constant XBEE_API_BAUD_RATE_TABLE => [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200];
 
 use constant XBEE_API_BROADCAST_ADDR_H          => 0x00;
