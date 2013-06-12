@@ -222,7 +222,7 @@ sub handle_xbee_event {
             next if $c == $sock;
             next if $c == $serial_port_device->{FD};
             next unless $clients{$c}->{unsolicited};
-            zpdapp::syswrite_zpd_reply( $client, { unsolicited => 1, power => $packet->{power} } );
+            zpdapp::syswrite_zpd_reply( $c, { unsolicited => 1, power => $packet->{power} } );
         }
     }
 }
