@@ -215,7 +215,12 @@ sub handle_xbee_event {
     my $sent_id = Device::XBee::API::Power::__make_unacked_id( $packet->{power}->{id} );
     my $client  = $pending_power_events{$sent_id};
 
-    my @sender_info = ( sh => $packet->{sh}, sl => $packet->{sl}, na => $packet->{na}, 'alias', $node_aliases_reverse{ $packet->{sh} . '_' . $packet->{sl} } );
+    my @sender_info = (
+        sh => $packet->{sh},
+        sl => $packet->{sl},
+        na => $packet->{na},
+        'alias', $node_aliases_reverse{ $packet->{sh} . '_' . $packet->{sl} }
+    );
 
     if ( $client ) {
         zpdapp::syswrite_zpd_reply( $client, { request_id => $sent_id, power => $packet->{power}, @sender_info } );

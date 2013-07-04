@@ -15,9 +15,9 @@ sub new {
     my $self = {};
     bless $self, $class;
     if ( ref $options ne 'HASH' ) { $options = {}; }
-    $self->{sock} = connect_to_zpd();
+    $self->{sock}         = connect_to_zpd();
     $self->{recv_timeout} = $options->{recv_timeout} || 20;
-    $self->{recv_queue} = [];
+    $self->{recv_queue}   = [];
     return $self;
 }
 
@@ -36,9 +36,9 @@ sub recv_no_queue {
 
 sub send_recv {
     my ( $self, $msg ) = @_;
-    return unless $self->send( $msg );   
+    return unless $self->send( $msg );
     my $id_packet = $self->recv_no_queue();
-    while( my $r = $self->recv_no_queue() ) {
+    while ( my $r = $self->recv_no_queue() ) {
         if ( $r->{request_id} == $id_packet->{tx_id} ) {
             return $r;
         } else {
