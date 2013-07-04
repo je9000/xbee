@@ -65,7 +65,7 @@ sub connect_to_zpd {
 
 sub make_zpd_reply {
     my ( $msg ) = @_;
-    $msg = YAML::Dump( $msg );
+    $msg = YAML::Dump( $msg ) . "#EOM\n";
     my $ml = length( $msg ) + 1;
     return sprintf( '%0' . REPLY_SIZE_LENGTH . "x\n%s\n", $ml, $msg );
 }

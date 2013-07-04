@@ -72,6 +72,7 @@ while ( my @ready = $sel->can_read() ) {
             } else {
                 if ( !$silent ) {
                     $read =~ s/\n+\z/\n/;
+                    if ( !@commands ) { print '#' . scalar(localtime()) . ":\n"; }
                     print $read;
                 }
             }

@@ -134,6 +134,14 @@ sub rx {
         @u = unpack( 'CC', $power_data );
         $p->{switch_count} = $u[0];
         $p->{sensor_count} = $u[1];
+        # Re-use this variable. Ew.
+        $u[0] = substr( $power_data, 2 );
+        if ( $u[0] ) {
+            @u = split( /\0/, $u[0] );
+            $p->{system_name} = $u[0];
+            $p->{switch_names} = [ split( /\x1/, $u[1] ) ];
+            $p->{sensor_names} = [ split( /\x1/, $u[2] ) ];
+        }
 
     } elsif ( $p->{type} == XBEE_POWER_PACKET_TYPE_ERROR ) {
         @u = unpack( 'C', $power_data );

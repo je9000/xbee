@@ -107,6 +107,7 @@ my $ui_options = [
 ];
 
 my $node_aliases;
+my %node_aliases_reverse;
 my $do_daemon;
 {
     my $node_alias_file;
@@ -117,15 +118,16 @@ my $do_daemon;
         foreach my $n ( keys( %{$node_aliases} ) ) {
             if ( $n =~ /^\d+_\d+$/ ) {
                 warn "Node alias $n looks like an address, this is probably a bad idea.";
-                if (   ( $node_aliases->{$n} ne 'HASH' )
-                    || ( !defined $node_aliases->{$n}->{addr_h} )
-                    || ( $node_aliases->{$n}->{addr_h} !~ /^\d+$/ )
-                    || ( !defined $node_aliases->{$n}->{addr_l} )
-                    || ( $node_aliases->{$n}->{addr_l} !~ /^\d+$/ ) )
-                {
-                    die "Node alias for $n appears to have missing or invalid address data";
-                }
             }
+            if (   ( ref $node_aliases->{$n} ne 'HASH' )
+                || ( !defined $node_aliases->{$n}->{sh} )
+                || ( $node_aliases->{$n}->{sh} !~ /^\d+$/ )
+                || ( !defined $node_aliases->{$n}->{sl} )
+                || ( $node_aliases->{$n}->{sl} !~ /^\d+$/ ) )
+            {
+                die "Node alias for $n appears to have missing or invalid address data";
+            }
+            $node_aliases_reverse{ $node_aliases->{$n}->{sh} . '_' . $node_aliases->{$n}->{sl} } = $n;
         }
     } else {
         $node_aliases = {};
@@ -213,8 +215,10 @@ sub handle_xbee_event {
     my $sent_id = Device::XBee::API::Power::__make_unacked_id( $packet->{power}->{id} );
     my $client  = $pending_power_events{$sent_id};
 
+    my @sender_info = ( sh => $packet->{sh}, sl => $packet->{sl}, na => $packet->{na}, 'alias', $node_aliases_reverse{ $packet->{sh} . '_' . $packet->{sl} } );
+
     if ( $client ) {
-        zpdapp::syswrite_zpd_reply( $client, { request_id => $sent_id, power => $packet->{power} } );
+        zpdapp::syswrite_zpd_reply( $client, { request_id => $sent_id, power => $packet->{power}, @sender_info } );
         delete $pending_power_events{$sent_id};
     } else {
         my @handles = $sel->handles();
@@ -222,7 +226,7 @@ sub handle_xbee_event {
             next if $c == $sock;
             next if $c == $serial_port_device->{FD};
             next unless $clients{$c}->{unsolicited};
-            zpdapp::syswrite_zpd_reply( $c, { unsolicited => 1, power => $packet->{power} } );
+            zpdapp::syswrite_zpd_reply( $c, { unsolicited => 1, power => $packet->{power}, @sender_info } );
         }
     }
 }
@@ -264,13 +268,8 @@ sub parse_command {
                 }
                 my $h = $api->known_nodes();
                 foreach my $n ( values( %{$h} ) ) {
-                    foreach my $alias ( keys( %{$node_aliases} ) ) {
-                        if (   ( $n->{sh} eq $node_aliases->{$alias}->{sh} )
-                            && ( $n->{sl} eq $node_aliases->{$alias}->{sl} ) )
-                        {
-                            $n->{alias} = $alias;
-                            last;
-                        }
+                    if ( $node_aliases_reverse{ $n->{sh} . '_' . $n->{sl} } ) {
+                        $n->{alias} = $node_aliases_reverse{ $n->{sh} . '_' . $n->{sl} };
                     }
                 }
                 return { known_nodes => $h };
