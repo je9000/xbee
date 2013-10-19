@@ -5,7 +5,7 @@ use strict;
 require Exporter;
 our ( @ISA, @EXPORT_OK, %EXPORT_TAGS );
 
-our $VERSION = 0.7;
+our $VERSION = 0.8;
 
 use IO::Select;
 use constant 1.01;
@@ -535,8 +535,8 @@ sub at {
 Send an AT command to a remote module. Accepts three parameters: a hashref with
 endpoint addresses, command options, frame_id; the AT command name (as
 two-character string); and the third as the expected data for that command (if
-any). See the XBee datasheet for a list of supported AT commands and expected
-data for each.
+any) as a string. See the XBee datasheet for a list of supported AT commands
+and expected data for each.
 
 Endpoint addresses should be specified as a hashref containing the following
 keys:
@@ -555,24 +555,46 @@ The low 32-bits of the destination address.
 
 The destination network address.
 
-=item disable_ack
-
-If included ack is disabled
-
 =item apply_changes
 
-If included changes applied immediate, if missing an AC command must be sent to
-apply changes
+If set, changes are applied immediately. If not set, an AT AC command must be
+sent separately before the changes will take effect.
+
+=back
+
+Note: The following command options are not supported on all XBee devices.
+
+=over 4
+
+=item disable_ack
+
+If set, the remote node will not reply with an ack.
 
 =item extended_xmit_timeout
 
-If included the exteded transmission timeout is used
+If set, the exteded transmission timeout will be used.
 
 =back
 
 Returns the frame ID sent for this packet. To retrieve the reply (if any), call
 one of the L<rx> methods. If no reply is expected, the caller should immediately
 free the returned frame ID via L<free_frame_id> to prevent frame ID leaks.
+
+=head3 Example
+
+The following example disables the blinking association light on the XBee with
+a constant on.
+
+ if (
+     !$api->remote_at(
+         { sh => 1234567, sl => 1234567890, apply_changes => 1 },
+         'D5', "\x1"
+     )
+ ) {
+     die "Transmit failed!";
+ }
+ my $rx = $api->rx();
+ warn Dumper( $rx );
 
 =cut
 
@@ -602,10 +624,10 @@ sub remote_at {
         $tx->{sl} = XBEE_API_BROADCAST_ADDR_L;
     }
     my ( $ack, $chg, $timeout );
-    if ( !defined $tx->{disable_ack} ) {
-        $ack = 0x00;
-    } else {
+    if ( defined $tx->{disable_ack} ) {
         $ack = 0x01;
+    } else {
+        $ack = 0x00;
     }
     if ( defined $tx->{apply_changes} ) {
         $chg = 0x02;
